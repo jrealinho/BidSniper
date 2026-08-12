@@ -1713,8 +1713,15 @@ ev:SetScript("OnEvent", function(self, event, arg1)
 		local numBatch, total = GetNumAuctionItems("list")
 		total = total or 0
 
-		-- a GetAll result arrives in pieces; wait until the client has it all
-		if BS.useGetAll and numBatch < total then return end
+		--[[
+			A GetAll answer is read on the very first update, exactly as
+			Auctionator does it. An earlier version waited for numBatch to
+			reach total on the theory that the dump streams in; on this server
+			that never becomes true, so every GetAll timed out and quietly fell
+			back to paging - a ten second scan turning into half an hour.
+			Only a genuinely empty list is worth waiting for.
+		]]
+		if BS.useGetAll and numBatch == 0 and total > 0 then return end
 
 		-- the same page served twice: ask again rather than double-count it
 		if not BS.useGetAll then
@@ -1770,12 +1777,26 @@ function BS:DumpScanInfo()
 	self:Print(format("CanSendAuctionQuery -> query=|cffffffff%s|r  getAll=|cffffffff%s|r",
 		tostring(canQuery), tostring(canQueryAll)))
 
-	if canQueryAll then
-		self:Print("GetAll is offered right now. If a scan still walks pages, the realm "
-			.. "accepted the request but never answered it.")
+	-- say plainly whether the next scan will be the fast one, and if not, why
+	local blockers = {}
+	if (self.db.category or 0) ~= 0 then
+		blockers[#blockers + 1] = "a category is selected (GetAll cannot filter)"
+	end
+	if self.db.resume then
+		blockers[#blockers + 1] = "a resume point exists (right-click Scan for a fresh one)"
+	end
+	if self.db.scanMethod == "paged" then
+		blockers[#blockers + 1] = "scan method is forced to paged"
+	end
+	if not canQueryAll then
+		blockers[#blockers + 1] = "the client will not allow GetAll yet (15 minute cooldown)"
+	end
+
+	if #blockers == 0 then
+		self:Print("|cff00ff00Next scan will use GetAll|r - the whole house in one request.")
 	else
-		self:Print("GetAll is not on offer: either the 15 minute client cooldown has not "
-			.. "expired, or this realm does not allow it at all.")
+		self:Print("|cffff8800Next scan will page through instead, because:|r")
+		for _, why in ipairs(blockers) do self:Print("   - " .. why) end
 	end
 end
 
