@@ -1,0 +1,10 @@
+## Interface: 30300
+## Title: BidSniper
+## Notes: Scans the whole auction house for auctions with a low bid and a much higher buyout.
+## Author: BidSniper
+## Version: 1.0
+## SavedVariables: BidSniperDB
+## OptionalDeps: Auctionator
+
+BidSniper.lua
+BidSniperUI.lua
