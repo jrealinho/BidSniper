@@ -236,45 +236,16 @@ function BS:BuildUI()
 	catBtn:SetPoint("TOPLEFT", COL[1], FIELD2_Y)
 	catBtn:SetWidth(260)
 	catBtn:SetHeight(22)
-	catBtn.Refresh = function() catBtn:SetText(BS:CategoryLabel(BS.db.category)) end
-
-	-- a menu opened on demand, rather than an inline dropdown widget whose
-	-- size is not ours to control
-	local catMenu = CreateFrame("Frame", "BidSniperCategoryMenu", f, "UIDropDownMenuTemplate")
-	catMenu:Hide()
-	UIDropDownMenu_Initialize(catMenu, function()
-		local info = UIDropDownMenu_CreateInfo()
-		info.text  = "All categories"
-		info.func  = function() BS.db.category = 0 catBtn.Refresh() BS:UpdateUI() end
-		info.checked = (BS.db.category == 0)
-		UIDropDownMenu_AddButton(info)
-
-		local names = BS:CategoryNames()
-		if names then
-			for i, name in ipairs(names) do
-				local entry   = UIDropDownMenu_CreateInfo()
-				entry.text    = name
-				entry.checked = (BS.db.category == i)
-				entry.func    = function()
-					BS.db.category = i
-					catBtn.Refresh()
-					BS:UpdateUI()
-				end
-				UIDropDownMenu_AddButton(entry)
-			end
-		end
-	end, "MENU")
-	catBtn:SetScript("OnClick", function(self)
-		if not BS:CategoryNames() then
-			BS:Print("Open the auction house once so the category list loads.")
-			return
-		end
-		ToggleDropDownMenu(1, nil, catMenu, self, 0, 0)
+	catBtn.Refresh = function() catBtn:SetText(BS:CategorySummary()) end
+	catBtn:SetScript("OnClick", function()
+		if BS.catFrame:IsShown() then BS.catFrame:Hide() else BS.catFrame:Show() end
 	end)
-	Tip(catBtn, "Limit the scan to one category",
-		"Scanning a single category is far quicker than the whole auction house. "
-		.. "GetAll cannot be filtered, so choosing a category always scans page by "
-		.. "page.")
+	Tip(catBtn, "Limit the scan to certain categories",
+		"Tick as many as you like - each one is scanned in turn, which is far "
+		.. "quicker than reading the whole auction house. Tick none to scan "
+		.. "everything. GetAll cannot be filtered, so choosing categories always "
+		.. "scans page by page.")
+	f.catBtn = catBtn
 
 	local wishBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
 	wishBtn:SetPoint("TOPLEFT", COL[3], FIELD2_Y)
@@ -413,10 +384,34 @@ function BS:BuildUI()
 		row.check:SetWidth(18)
 		row.check:SetHeight(18)
 		row.check:SetPoint("LEFT", 2, 0)
+		-- fire on press, not release, so the press can begin a drag
+		row.check:RegisterForClicks("LeftButtonDown")
 		row.check:SetScript("OnClick", function(self)
-			local r = row.result
-			if r then r.selected = self:GetChecked() and true or false end
+			local r, idx = row.result, row.resultIndex
+			if not r or not idx then return end
+
+			local state = self:GetChecked() and true or false
+
+			if IsShiftKeyDown() and BS.lastTickIndex and BS.lastTickIndex ~= idx then
+				local n = BS:SelectRange(BS.lastTickIndex, idx, state)
+				BS:SetStatus(format("%s %d row%s.", state and "Ticked" or "Unticked",
+					n, n == 1 and "" or "s"))
+			else
+				BS:ApplySelect(r, state)
+				BS.lastTickIndex = idx
+			end
+
+			-- keep painting the same state onto whatever we drag across
+			BS.dragging  = true
+			BS.dragState = state
 			BS:UpdateUI()
+		end)
+		row.check:SetScript("OnEnter", function(self)
+			if BS.dragging and row.result then
+				BS:ApplySelect(row.result, BS.dragState)
+				BS.lastTickIndex = row.resultIndex or BS.lastTickIndex
+				BS:UpdateUI()
+			end
 		end)
 
 		row.icon = row:CreateTexture(nil, "ARTWORK")
@@ -480,6 +475,7 @@ function BS:BuildUI()
 			if r.bidPlaced then
 				GameTooltip:AddLine("You have already bid on this one.", 0.2, 1, 0.2)
 			end
+			GameTooltip:AddLine("Tick box: drag to paint, shift-tick for a range", 0.6, 0.9, 1)
 			GameTooltip:AddLine("Click: bid " .. BS.Money(r.bid) .. " (asks to confirm)", 0.6, 0.9, 1)
 			GameTooltip:AddLine("Ctrl-click: load it onto the BID button", 1, 0.6, 0.3)
 			GameTooltip:AddLine("Right-click: search this item in Browse", 0.6, 0.9, 1)
@@ -496,7 +492,7 @@ function BS:BuildUI()
 	local hint = f:CreateFontString(nil, "ARTWORK")
 	Font(hint, 10, 0.5, 0.5, 0.5)
 	hint:SetPoint("BOTTOMLEFT", 18, 46)
-	hint:SetText("tick = select    click = bid    ctrl-click = arm the BID button")
+	hint:SetText("drag the boxes, or shift-tick for a range    click a row = bid")
 
 	local status = f:CreateFontString(nil, "ARTWORK")
 	Font(status, 11, 1, 1, 1)
@@ -561,6 +557,7 @@ function BS:BuildUI()
 	f.batchBtn = batchBtn
 
 	self:BuildWishlistUI(f)
+	self:BuildCategoryUI(f)
 
 	f.refreshers = { ratioEdit, maxBidEdit, minBuyEdit, qualityBtn, catBtn,
 	                 cbNoBids, cbSoon, cbOwn, cbAuto }
@@ -580,6 +577,239 @@ function BS:BuildUI()
 	self.frame = f
 	self:RefreshControls()
 	self:SetStatus("Open the auction house and press Scan AH.")
+end
+
+--=============================================================================
+--  category panel
+--=============================================================================
+
+local CAT_ROWS, CAT_ROW_H = 15, 22
+
+function BS:BuildCategoryUI(parent)
+	local c = CreateFrame("Frame", "BidSniperCategoryFrame", parent)
+	c:SetWidth(320)
+	c:SetHeight(140 + CAT_ROWS * CAT_ROW_H)
+	c:SetPoint("TOPLEFT", parent, "TOPRIGHT", 4, 0)
+	c:SetFrameStrata("HIGH")
+	c:SetToplevel(true)
+	c:SetBackdrop({
+		bgFile   = "Interface\\DialogFrame\\UI-DialogBox-Background",
+		edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
+		tile = true, tileSize = 32, edgeSize = 32,
+		insets = { left = 11, right = 12, top = 12, bottom = 11 },
+	})
+	c:EnableMouse(true)
+	c:Hide()
+
+	-- only one side panel at a time, they share the same spot
+	c:SetScript("OnShow", function()
+		if BS.wishFrame then BS.wishFrame:Hide() end
+		BS:RefreshCategories()
+	end)
+
+	local title = c:CreateFontString(nil, "ARTWORK")
+	Font(title, 12, 1, 0.82, 0)
+	title:SetPoint("TOP", 0, -14)
+	title:SetText("Categories")
+
+	local close = CreateFrame("Button", nil, c, "UIPanelCloseButton")
+	close:SetPoint("TOPRIGHT", -6, -6)
+
+	local help = c:CreateFontString(nil, "ARTWORK")
+	Font(help, 10, 0.6, 0.6, 0.6)
+	help:SetPoint("TOPLEFT", 18, -38)
+	help:SetWidth(300)
+	help:SetJustifyH("LEFT")
+	help:SetText("Tick a category, or open it with [+] and tick individual "
+		.. "subcategories. Nothing ticked scans everything.")
+	help:SetHeight(26)
+
+	local scroll = CreateFrame("ScrollFrame", "BidSniperCatScroll", c, "FauxScrollFrameTemplate")
+	scroll:SetPoint("TOPLEFT", 18, -74)
+	scroll:SetWidth(258)
+	scroll:SetHeight(CAT_ROWS * CAT_ROW_H)
+	scroll:SetScript("OnVerticalScroll", function(self, offset)
+		FauxScrollFrame_OnVerticalScroll(self, offset, CAT_ROW_H,
+			function() BS:RefreshCategories() end)
+	end)
+	c.scroll = scroll
+
+	c.rows = {}
+	for i = 1, CAT_ROWS do
+		local row = CreateFrame("Frame", nil, c)
+		row:SetWidth(258)
+		row:SetHeight(CAT_ROW_H)
+		if i == 1 then
+			row:SetPoint("TOPLEFT", scroll, "TOPLEFT", 0, 0)
+		else
+			row:SetPoint("TOPLEFT", c.rows[i - 1], "BOTTOMLEFT", 0, 0)
+		end
+
+		-- [+] / [-] for classes that have subcategories
+		local expand = CreateFrame("Button", nil, row)
+		expand:SetWidth(16)
+		expand:SetHeight(16)
+		expand:SetPoint("LEFT", 0, 0)
+		local etext = expand:CreateFontString(nil, "ARTWORK")
+		Font(etext, 12, 1, 0.82, 0)
+		etext:SetAllPoints()
+		expand.label = etext
+		expand:SetScript("OnClick", function(self)
+			if not self.class then return end
+			BS.db.catExpanded[self.class] = (not BS.db.catExpanded[self.class]) or nil
+			BS:RefreshCategories()
+		end)
+		row.expand = expand
+
+		local cb = CreateFrame("CheckButton", nil, row, "UICheckButtonTemplate")
+		cb:SetWidth(20)
+		cb:SetHeight(20)
+		row.check = cb
+
+		local text = row:CreateFontString(nil, "ARTWORK")
+		Font(text, 11, 1, 1, 1)
+		text:SetJustifyH("LEFT")
+		row.text = text
+
+		cb:SetScript("OnClick", function(self)
+			local entry = row.entry
+			if not entry then return end
+			local on = self:GetChecked() and true or false
+
+			if entry.sub then
+				local set = BS.db.subcats[entry.class]
+				if not set then set = {} BS.db.subcats[entry.class] = set end
+				set[entry.sub] = on or nil
+				-- picking subcategories means "only these", not the whole class
+				if on then BS.db.categories[entry.class] = nil end
+			else
+				BS.db.categories[entry.class] = on or nil
+				-- a whole class supersedes any subcategory picks under it
+				if on then BS.db.subcats[entry.class] = nil end
+			end
+
+			BS:RefreshCategories()
+			BS:RefreshControls()
+			BS:UpdateUI()
+		end)
+
+		row:Hide()
+		c.rows[i] = row
+	end
+
+	local allBtn = CreateFrame("Button", nil, c, "UIPanelButtonTemplate")
+	allBtn:SetPoint("BOTTOMLEFT", 18, 18)
+	allBtn:SetWidth(84)
+	allBtn:SetHeight(22)
+	allBtn:SetText("Tick all")
+	allBtn:SetScript("OnClick", function()
+		local names = BS:CategoryNames()
+		if not names then return end
+		for i = 1, #names do BS.db.categories[i] = true end
+		BS.db.subcats = {}
+		BS:RefreshCategories()
+		BS:RefreshControls()
+		BS:UpdateUI()
+	end)
+
+	local noneBtn = CreateFrame("Button", nil, c, "UIPanelButtonTemplate")
+	noneBtn:SetPoint("BOTTOMLEFT", 108, 18)
+	noneBtn:SetWidth(84)
+	noneBtn:SetHeight(22)
+	noneBtn:SetText("Clear")
+	noneBtn:SetScript("OnClick", function()
+		BS.db.categories = {}
+		BS.db.subcats    = {}
+		BS:RefreshCategories()
+		BS:RefreshControls()
+		BS:UpdateUI()
+	end)
+
+	local count = c:CreateFontString(nil, "ARTWORK")
+	Font(count, 11, 0.7, 0.7, 0.7)
+	count:SetPoint("BOTTOMRIGHT", -18, 24)
+	c.count = count
+
+	self.catFrame = c
+end
+
+-- classes, with the subclasses of any opened class folded in beneath them
+function BS:CategoryTree()
+	local tree  = {}
+	local names = self:CategoryNames()
+	if not names then return tree end
+
+	for i, name in ipairs(names) do
+		local subs = self:SubCategoryNames(i)
+		tree[#tree + 1] = { class = i, name = name, hasSubs = subs ~= nil }
+		if subs and self.db.catExpanded[i] then
+			for j, subName in ipairs(subs) do
+				tree[#tree + 1] = { class = i, sub = j, name = subName }
+			end
+		end
+	end
+	return tree
+end
+
+function BS:RefreshCategories()
+	local c = self.catFrame
+	if not c then return end
+
+	local tree   = self:CategoryTree()
+	local offset = FauxScrollFrame_GetOffset(c.scroll) or 0
+
+	for i = 1, CAT_ROWS do
+		local row   = c.rows[i]
+		local entry = tree[offset + i]
+
+		if entry then
+			row.entry = entry
+			local indent = entry.sub and 18 or 0
+
+			if entry.sub then
+				row.expand:Hide()
+				row.check:SetChecked(self.db.subcats[entry.class]
+					and self.db.subcats[entry.class][entry.sub] and true or false)
+				row.text:SetTextColor(0.85, 0.85, 0.85)
+			else
+				row.expand.class = entry.hasSubs and entry.class or nil
+				row.expand.label:SetText(entry.hasSubs
+					and (self.db.catExpanded[entry.class] and "-" or "+") or "")
+				if entry.hasSubs then row.expand:Show() else row.expand:Hide() end
+				row.check:SetChecked(self.db.categories[entry.class] and true or false)
+				row.text:SetTextColor(1, 1, 1)
+			end
+
+			row.check:SetPoint("LEFT", 16 + indent, 0)
+			row.text:SetPoint("LEFT", 38 + indent, 0)
+			row.text:SetWidth(216 - indent)
+
+			-- a class with subcategories picked reads as partly chosen
+			local label = entry.name
+			if not entry.sub then
+				local picked = #self:SelectedSubCategories(entry.class)
+				if picked > 0 then
+					label = label .. format(" |cffffd100(%d)|r", picked)
+				end
+			end
+			row.text:SetText(label)
+			row:Show()
+		else
+			row.entry = nil
+			row:Hide()
+		end
+	end
+
+	local names = self:CategoryNames()
+	if not names then
+		c.count:SetText("|cffff8800open the auction house first|r")
+	else
+		local classes = self:ActiveClasses()
+		c.count:SetText(#classes == 0 and "scanning everything"
+			or format("%d of %d categories", #classes, #names))
+	end
+
+	FauxScrollFrame_Update(c.scroll, #tree, CAT_ROWS, CAT_ROW_H)
 end
 
 --=============================================================================
@@ -603,6 +833,10 @@ function BS:BuildWishlistUI(parent)
 	})
 	w:EnableMouse(true)
 	w:Hide()
+	w:SetScript("OnShow", function()
+		if BS.catFrame then BS.catFrame:Hide() end
+		BS:RefreshWishlist()
+	end)
 
 	local title = w:CreateFontString(nil, "ARTWORK")
 	Font(title, 12, 1, 0.82, 0)
@@ -725,6 +959,7 @@ function BS:RefreshControls()
 	for _, w in ipairs(f.refreshers) do
 		if w.Refresh then w.Refresh() end
 	end
+	if self.catFrame and self.catFrame:IsShown() then self:RefreshCategories() end
 end
 
 function BS:SetStatus(text)
@@ -871,7 +1106,8 @@ function BS:UpdateUI()
 		if r then
 			BS:FillValue(r)
 
-			row.result = r
+			row.result      = r
+			row.resultIndex = offset + i
 			row.icon:SetTexture(r.texture)
 			row.check:SetChecked(r.selected and true or false)
 
@@ -900,7 +1136,8 @@ function BS:UpdateUI()
 			row.cells[8]:SetText(r.owner or "|cff666666?|r")
 			row:Show()
 		else
-			row.result = nil
+			row.result      = nil
+			row.resultIndex = nil
 			row:Hide()
 		end
 	end

@@ -24,7 +24,9 @@ BS.defaults = {
 	endingSoon  = false,		-- only time left Short or Medium
 	autoShow    = true,		-- open the window with the auction house
 	scanMethod  = "auto",		-- auto | paged | getall
-	category    = 0,		-- 0 = every category, else an auction class index
+	categories  = {},		-- set of auction class indices; empty = all of them
+	subcats     = {},		-- class index -> set of subclass indices
+	catExpanded = {},		-- which classes are opened out in the panel
 	wishlist    = {},		-- item names to check on a wishlist scan
 	priceCache  = {},		-- item name -> { v = unit price, t = when }
 	knownChars  = {},		-- every character of yours that has logged in
@@ -269,6 +271,7 @@ local ev = CreateFrame("Frame", "BidSniperEventFrame")
 -- keep the saved copy pointing at the live table
 function BS:SetResults(t)
 	self.results = t
+	self.lastTickIndex = nil		-- old row numbers mean nothing now
 	if BidSniperDB then BidSniperDB.lastResults = t end
 end
 
@@ -302,6 +305,87 @@ function BS:CategoryLabel(index)
 	return (names and names[index]) or ("Category " .. index)
 end
 
+-- Subclass names for a class, asked for once and kept. GetAuctionItemSubClasses
+-- is only answered while the auction house is open, so a failure is not cached
+-- as "none" - false means "there genuinely are none".
+function BS:SubCategoryNames(classIndex)
+	self.subNames = self.subNames or {}
+	if self.subNames[classIndex] == nil then
+		local ok, t = pcall(function() return { GetAuctionItemSubClasses(classIndex) } end)
+		if ok and t and #t > 0 then
+			self.subNames[classIndex] = t
+		elseif ok then
+			self.subNames[classIndex] = false
+		end
+	end
+	local t = self.subNames[classIndex]
+	return (t and t ~= false) and t or nil
+end
+
+function BS:SubCategoryLabel(classIndex, subIndex)
+	local subs = self:SubCategoryNames(classIndex)
+	return (subs and subs[subIndex]) or ("Subcategory " .. subIndex)
+end
+
+-- the chosen classes, lowest index first
+function BS:SelectedCategories()
+	local chosen = {}
+	for index, on in pairs(self.db.categories or {}) do
+		if on then chosen[#chosen + 1] = index end
+	end
+	sort(chosen)
+	return chosen
+end
+
+function BS:SelectedSubCategories(classIndex)
+	local chosen = {}
+	local set = self.db.subcats and self.db.subcats[classIndex]
+	if set then
+		for index, on in pairs(set) do
+			if on then chosen[#chosen + 1] = index end
+		end
+	end
+	sort(chosen)
+	return chosen
+end
+
+-- every class that contributes to a scan, whether whole or by subclass
+function BS:ActiveClasses()
+	local seen, list = {}, {}
+	for _, index in ipairs(self:SelectedCategories()) do
+		if not seen[index] then seen[index] = true list[#list + 1] = index end
+	end
+	for index in pairs(self.db.subcats or {}) do
+		if #self:SelectedSubCategories(index) > 0 and not seen[index] then
+			seen[index] = true
+			list[#list + 1] = index
+		end
+	end
+	sort(list)
+	return list
+end
+
+function BS:CategorySummary()
+	local classes = self:ActiveClasses()
+	if #classes == 0 then return "All categories" end
+
+	local parts, subTotal = {}, 0
+	for _, index in ipairs(classes) do
+		local subs = self:SelectedSubCategories(index)
+		if #subs > 0 then
+			subTotal = subTotal + #subs
+			parts[#parts + 1] = format("%s (%d)", self:CategoryLabel(index), #subs)
+		else
+			parts[#parts + 1] = self:CategoryLabel(index)
+		end
+	end
+
+	if #parts == 1 then return parts[1] end
+	if #parts == 2 then return parts[1] .. ", " .. parts[2] end
+	return format("%d categories%s", #parts,
+		subTotal > 0 and (", " .. subTotal .. " subcategories") or "")
+end
+
 -- A scan is a queue of queries. Normally one ("everything", or one category),
 -- but a wishlist scan is one query per item on the list.
 function BS:BuildQueries(mode)
@@ -314,19 +398,56 @@ function BS:BuildQueries(mode)
 			end
 		end
 	else
-		local c = self.db.category or 0
-		list[1] = {
-			name       = "",
-			classIndex = (c > 0) and c or nil,
-			label      = self:CategoryLabel(c),
-		}
+		-- One query per chosen class, or one per subclass where any subclass
+		-- of that class is ticked. Nothing ticked means one sweep of the lot.
+		local classes = self:ActiveClasses()
+		if #classes == 0 then
+			list[1] = { name = "", label = "All categories" }
+		else
+			for _, index in ipairs(classes) do
+				local subs = self:SelectedSubCategories(index)
+				if #subs > 0 then
+					for _, subIndex in ipairs(subs) do
+						list[#list + 1] = {
+							name          = "",
+							classIndex    = index,
+							subclassIndex = subIndex,
+							label = self:CategoryLabel(index) .. " - "
+							        .. self:SubCategoryLabel(index, subIndex),
+						}
+					end
+				else
+					list[#list + 1] = {
+						name       = "",
+						classIndex = index,
+						label      = self:CategoryLabel(index),
+					}
+				end
+			end
+		end
 	end
 
 	return list
 end
 
 local FILTER_KEYS = { "minRatio", "maxBid", "minBuyout", "minQuality",
-                      "hideOwn", "onlyNoBids", "endingSoon", "category" }
+                      "hideOwn", "onlyNoBids", "endingSoon" }
+
+-- categories are a set, so compare them as a sorted string rather than by
+-- table identity, which would always look different
+local function CategorySignature(db)
+	local parts = {}
+	for index, on in pairs(db.categories or {}) do
+		if on then parts[#parts + 1] = "c" .. index end
+	end
+	for index, set in pairs(db.subcats or {}) do
+		for subIndex, on in pairs(set) do
+			if on then parts[#parts + 1] = "s" .. index .. "." .. subIndex end
+		end
+	end
+	sort(parts)
+	return table.concat(parts, ",")
+end
 
 -- Remember where an interrupted scan got to, so it can pick up rather than
 -- start the whole auction house again. Only paged scans have a position worth
@@ -338,7 +459,7 @@ function BS:SaveResume()
 		return
 	end
 
-	local filters = {}
+	local filters = { categorySig = CategorySignature(self.db) }
 	for _, k in ipairs(FILTER_KEYS) do filters[k] = self.db[k] end
 
 	self.db.resume = {
@@ -364,6 +485,7 @@ end
 
 local function FiltersChanged(saved, db)
 	if not saved then return false end
+	if saved.categorySig and saved.categorySig ~= CategorySignature(db) then return true end
 	for _, k in ipairs(FILTER_KEYS) do
 		if saved[k] ~= db[k] then return true end
 	end
@@ -435,7 +557,8 @@ function BS:StartScan(resume, mode)
 	-- any use for an unfiltered scan. A resume stays paged too, or it would
 	-- throw away the pages already read.
 	local method = self.db.scanMethod
-	local getAllUsable = not res and mode == "normal" and (self.db.category or 0) == 0
+	local getAllUsable = not res and mode == "normal"
+	                     and #self:ActiveClasses() == 0
 	self.useGetAll = getAllUsable and ((method == "getall") or (method == "auto" and canQueryAll))
 	if self.useGetAll and not canQueryAll then
 		self.useGetAll = false
@@ -660,6 +783,11 @@ function BS:ProcessChunk()
 end
 
 ev:SetScript("OnUpdate", function(self, elapsed)
+	-- a tick-box drag ends wherever the button is let go, not just over a row
+	if BS.dragging and not IsMouseButtonDown("LeftButton") then
+		BS.dragging = nil
+	end
+
 	-- looking up a single auction so we can bid on it
 	if BS.bidQueryPending then
 		BS.bidThrottle = BS.bidThrottle + elapsed
@@ -1222,6 +1350,34 @@ function BS:CountSelected()
 	return selected, selectable, total
 end
 
+-- Ticking obeys the same rule as Select all: never bulk-tick something already
+-- bid on or certainly ended, but always allow unticking anything.
+function BS:ApplySelect(r, state)
+	if not r then return end
+	if state then
+		if r.bidPlaced or BS.Expired(r) then return end
+		r.selected = true
+	else
+		r.selected = false
+	end
+end
+
+-- shift-clicking a tick box fills in everything between it and the last one
+function BS:SelectRange(from, to, state)
+	if from > to then from, to = to, from end
+	local changed = 0
+	for i = from, to do
+		local r = self.results[i]
+		if r then
+			local before = r.selected
+			self:ApplySelect(r, state)
+			if before ~= r.selected then changed = changed + 1 end
+		end
+	end
+	self:UpdateUI()
+	return changed
+end
+
 -- one button for both directions: tick everything, or clear everything.
 -- Select all skips rows already bid on, but you can still tick those by hand -
 -- a mark this addon got wrong must never lock a row away from you.
@@ -1597,6 +1753,17 @@ ev:SetScript("OnEvent", function(self, event, arg1)
 		BidSniperDB.wishlist   = BidSniperDB.wishlist   or {}
 		BidSniperDB.priceCache = BidSniperDB.priceCache or {}
 		BidSniperDB.knownChars = BidSniperDB.knownChars or {}
+		BidSniperDB.categories  = BidSniperDB.categories  or {}
+		BidSniperDB.subcats     = BidSniperDB.subcats     or {}
+		BidSniperDB.catExpanded = BidSniperDB.catExpanded or {}
+
+		-- category used to be a single index; carry an old setting over
+		if type(BidSniperDB.category) == "number" then
+			if BidSniperDB.category > 0 then
+				BidSniperDB.categories[BidSniperDB.category] = true
+			end
+			BidSniperDB.category = nil
+		end
 		BS.db = BidSniperDB
 
 		-- results are saved, so a /reload or a relog does not cost you a scan
@@ -1779,8 +1946,10 @@ function BS:DumpScanInfo()
 
 	-- say plainly whether the next scan will be the fast one, and if not, why
 	local blockers = {}
-	if (self.db.category or 0) ~= 0 then
-		blockers[#blockers + 1] = "a category is selected (GetAll cannot filter)"
+	local chosen = self:ActiveClasses()
+	if #chosen > 0 then
+		blockers[#blockers + 1] = format("%d categor%s selected (GetAll cannot filter)",
+			#chosen, #chosen == 1 and "y is" or "ies are")
 	end
 	if self.db.resume then
 		blockers[#blockers + 1] = "a resume point exists (right-click Scan for a fresh one)"

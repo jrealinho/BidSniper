@@ -17,6 +17,24 @@ Interface/AddOns/BidSniper/BidSniper.lua
 Interface/AddOns/BidSniper/BidSniperUI.lua
 ```
 
+> ### ⚠️ The WoW folder must not be read-only
+>
+> **Do not extract into a read-only folder, and clear the read-only flag on the
+> addon folder if Windows set one.** Right-click the folder → *Properties* →
+> untick **Read-only** → *Apply* → *Apply to all subfolders*.
+>
+> This bites hardest on portable "no install" copies of WoW under
+> `C:\Program Files`, where Windows blocks writes silently.
+>
+> Everything BidSniper remembers — your scan results, wishlist, categories,
+> settings, resume point and price cache — is written by WoW to
+> `WTF\Account\<ACCOUNT>\SavedVariables\BidSniper.lua` when you log out or
+> `/reload`. If that path is not writable **the save fails silently**: the
+> addon works perfectly all session and then comes back blank every time,
+> with no error to explain why.
+>
+> A quick check: change a filter, `/reload`, and see whether it stuck.
+
 Optional: [Auctionator](https://github.com/Auctionator/Auctionator) fills in
 the **Market** and **Profit** columns. Everything else works without it.
 
@@ -49,6 +67,15 @@ the **Market** and **Profit** columns. Everything else works without it.
 | Right-click | Search that item in the normal Browse tab |
 | Shift-click | Link the item into chat |
 | Tick box | Select it for a batch |
+| Drag down the tick boxes | Paint the same state onto every row you cross |
+| Shift-click a tick box | Select the whole range back to the last one you ticked |
+
+Range select works across scrolling: tick row 3, scroll down, shift-tick row
+200, and everything between takes that state. Dragging is for quick local
+adjustments — it covers the rows currently on screen.
+
+Both refuse to *tick* rows already bid on or marked `gone`, but will always
+untick anything.
 
 ---
 
@@ -93,7 +120,7 @@ alone and reported.
 | **Max bid** | Ignore anything costing more than this to bid on. `0` = no limit |
 | **Min buyout** | Ignore junk below this buyout |
 | **Min quality** | Click to step up, right-click to step back |
-| **Category** | Limit the scan to one auction house category |
+| **Categories** | Limit the scan to chosen categories and subcategories |
 | **Only unbid** | Only auctions nobody has bid on |
 | **Ending < 2h** | Only Short and Medium time left |
 | **Hide mine** | Skip auctions from any of your characters, and ones you're winning |
@@ -103,6 +130,26 @@ Money boxes accept `50`, `50g`, `1s50c` — a plain number means gold.
 Defaults are ratio `10x`, max bid `50g`, min buyout `1g`.
 
 ---
+
+## Categories
+
+The **Categories** button opens a panel listing every auction house category.
+Tick as many as you like — each is scanned in turn, which is far quicker than
+reading the whole house. Tick none to scan everything.
+
+Categories with subcategories have a `[+]` beside them. Open one and you can
+tick individual subcategories instead — *Trade Goods → Herb*, say, rather than
+all of Trade Goods. A category showing `(3)` has three subcategories picked.
+
+The two are mutually exclusive per category, which keeps the meaning clear:
+
+* Ticking a **category** clears any subcategory picks under it — you want all
+  of it.
+* Ticking a **subcategory** unticks the parent — you want only those parts.
+
+**Tick all** selects every category, **Clear** goes back to scanning
+everything. The list comes from the auction house itself, so open one once
+before the panel can offer anything.
 
 ## Wishlist
 
@@ -127,7 +174,7 @@ qualify. The lower your Max bid, the shorter the scan.
 
 `auto` (the default) uses GetAll when it can and falls back to paging.
 
-GetAll cannot be filtered, so it is **not** used when a category is selected,
+GetAll cannot be filtered, so it is **not** used when any category is selected,
 when resuming, or when the method is forced to `paged`. Run `/snipe debug` and
 it will tell you which mode the next scan uses and, if it's paging, exactly why.
 
@@ -216,8 +263,12 @@ have the next one ready the instant you click. That is what the BID button is.
 
 ## Saved data
 
-Everything lives in `BidSniperDB` — settings, wishlist, results, resume point,
-price cache, and the list of your characters. Results persist across reloads
-and relogs, so a scan is never lost to a UI reload.
+Everything lives in `BidSniperDB` — settings, wishlist, categories, results,
+resume point, price cache, and the list of your characters. Results persist
+across reloads and relogs, so a scan is never lost to a UI reload.
 
-Note that WoW only writes saved variables on a clean `/reload`, logout or exit.
+Two things to know:
+
+* WoW only writes saved variables on a clean `/reload`, logout or exit. A crash
+  or alt-F4 loses whatever changed since the last write.
+* The folder must be writable — see the warning under [Install](#install).
