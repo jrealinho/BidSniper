@@ -430,6 +430,58 @@ function BS:BuildQueries(mode)
 	return list
 end
 
+--[[
+	GetAll hands back the entire auction house and ignores the query's filters,
+	which is why choosing categories used to force the slow paged scan. It does
+	not have to: we can take the fast dump and sort the categories out
+	ourselves, because every auction's item carries its own class.
+
+	This builds the lookup once per scan - class name -> true for a whole
+	class, or a set of subclass names - so the check per auction is one table
+	read. Returns nil when nothing is selected, meaning "keep everything".
+]]
+function BS:BuildCategoryMatcher()
+	local classes = self:ActiveClasses()
+	if #classes == 0 then return nil end
+
+	local matcher = {}
+	for _, index in ipairs(classes) do
+		local subs = self:SelectedSubCategories(index)
+		if #subs == 0 then
+			matcher[self:CategoryLabel(index)] = true
+		else
+			local set = {}
+			for _, subIndex in ipairs(subs) do
+				set[self:SubCategoryLabel(index, subIndex)] = true
+			end
+			matcher[self:CategoryLabel(index)] = set
+		end
+	end
+	return matcher
+end
+
+-- Item class and subclass, cached by name: a full sweep sees the same items
+-- over and over, and GetItemInfo is far too slow to call per auction.
+function BS:ItemClass(name, link)
+	local cache = self.classCache
+	if not cache then cache = {} self.classCache = cache end
+
+	local hit = cache[name]
+	if hit ~= nil then
+		if hit == false then return nil end
+		return hit[1], hit[2]
+	end
+
+	local _, _, _, _, _, itemType, itemSubType = GetItemInfo(link or name)
+	if itemType then
+		cache[name] = { itemType, itemSubType }
+		return itemType, itemSubType
+	end
+
+	cache[name] = false		-- not in the client's item cache this scan
+	return nil
+end
+
 local FILTER_KEYS = { "minRatio", "maxBid", "minBuyout", "minQuality",
                       "hideOwn", "onlyNoBids", "endingSoon" }
 
@@ -499,14 +551,51 @@ function BS:StartScan(resume, mode)
 		return
 	end
 
-	local canQuery, canQueryAll = CanSendAuctionQuery("list")
+	local canQuery, canQueryAll = CanSendAuctionQuery()
 
 	local res = resume and self.db.resume or nil
 	mode = res and res.mode or mode or "normal"
+	self.scanMode = mode
 
-	self.scanMode  = mode
-	self.queries   = self:BuildQueries(mode)
-	self.queryIndex = 1
+	-- Decide the method before building the queries: a GetAll is a single
+	-- request whatever the filters say, and the categories get applied to the
+	-- results instead.
+	local method = self.db.scanMethod
+	local getAllUsable = not res and mode == "normal"
+	self.useGetAll = getAllUsable
+	                 and ((method == "getall") or (method == "auto" and canQueryAll))
+	if self.useGetAll and not canQueryAll then self.useGetAll = false end
+
+	-- Never leave this silent. A scan quietly choosing the slow path looks
+	-- like the addon is broken, so say which one it is and why.
+	if self.useGetAll then
+		self:Print("|cff00ff00Fast scan|r (GetAll) - the whole auction house in one request.")
+	else
+		local why
+		if res then
+			why = "resuming an interrupted scan"
+		elseif mode == "wishlist" then
+			why = "a wishlist scan searches item by item"
+		elseif method == "paged" then
+			why = "scan method is set to paged - use |cffffffff/snipe auto|r for the fast one"
+		elseif not canQueryAll then
+			why = "GetAll is on cooldown, up to 15 minutes between full sweeps"
+		else
+			why = "GetAll is unavailable"
+		end
+		self:Print("|cffff8800Paged scan|r - " .. why .. ".")
+	end
+
+	if self.useGetAll then
+		self.queries  = { { name = "", label = "everything" } }
+		self.catMatch = self:BuildCategoryMatcher()
+	else
+		self.queries  = self:BuildQueries(mode)
+		self.catMatch = nil		-- the server filters a paged scan for us
+	end
+	self.queryIndex   = 1
+	self.classCache   = {}
+	self.unclassified = 0
 
 	if #self.queries == 0 then
 		self:Print("Your wishlist is empty - add some items to it first.")
@@ -553,18 +642,6 @@ function BS:StartScan(resume, mode)
 	self.processing     = false
 	self.scanStart      = GetTime()
 
-	-- GetAll ignores every filter and returns the whole house, so it is only
-	-- any use for an unfiltered scan. A resume stays paged too, or it would
-	-- throw away the pages already read.
-	local method = self.db.scanMethod
-	local getAllUsable = not res and mode == "normal"
-	                     and #self:ActiveClasses() == 0
-	self.useGetAll = getAllUsable and ((method == "getall") or (method == "auto" and canQueryAll))
-	if self.useGetAll and not canQueryAll then
-		self.useGetAll = false
-		self:Print("GetAll is not available right now (server or 15 minute cooldown) - scanning page by page.")
-	end
-
 	-- A GetAll dump comes back unsorted, so sorting only makes sense per page.
 	-- Cheapest bid first means the auctions you care about arrive first, and
 	-- once bids pass your max bid there is nothing left worth reading.
@@ -592,7 +669,7 @@ function BS:StopScan(reason)
 	local res, nextPage, pages = self:ResumeInfo()
 
 	if res then
-		self:SetStatus(format("%s  |cffffd100Stopped at page %d%s - press Resume scan.|r",
+		self:SetStatus(format("%s  |cffffd100Stopped at page %d%s - Resume, or Scan AH to start over.|r",
 			reason or "Scan stopped.", nextPage,
 			pages > 0 and (" of " .. pages) or ""))
 	else
@@ -622,6 +699,13 @@ function BS:FinishScan()
 		self.truncated and "  |cffff5555[capped]|r" or ""))
 	self:UpdateUI()
 
+	if self.catMatch and (self.unclassified or 0) > 0 then
+		self:Print(format("%s auction%s could not be sorted into a category "
+			.. "(the item was not in your client's cache) and were kept rather "
+			.. "than dropped.", BS.Comma(self.unclassified),
+			self.unclassified == 1 and "" or "s"))
+	end
+
 	if #self.results == 0 then
 		self:Print("No auctions matched your filters. Try lowering the ratio or raising the max bid.")
 	end
@@ -642,6 +726,20 @@ function BS:Evaluate(index)
 	-- what you would actually have to pay to be the high bidder right now
 	local bid = (bidAmount > 0) and (bidAmount + minIncrement) or minBid
 	if bid <= 0 or bid >= buyoutPrice then return end
+
+	-- category filtering for a GetAll, which the server hands over unfiltered
+	if self.catMatch then
+		local itemType, itemSubType = self:ItemClass(name, GetAuctionItemLink("list", index))
+		if itemType then
+			local rule = self.catMatch[itemType]
+			if not rule then return end
+			if rule ~= true and not rule[itemSubType] then return end
+		else
+			-- item not in the client cache, so we cannot say what it is;
+			-- keeping it beats silently dropping a real find
+			self.unclassified = (self.unclassified or 0) + 1
+		end
+	end
 
 	local cfg = self.db
 	if cfg.onlyNoBids and bidAmount > 0 then return end
@@ -802,7 +900,7 @@ ev:SetScript("OnUpdate", function(self, elapsed)
 		-- server, so the two cannot race over which auction list is current
 		if BS.bidThrottle >= 0.15
 		   and GetTime() >= (BS.bidQueryEarliest or 0)
-		   and CanSendAuctionQuery("list") then
+		   and CanSendAuctionQuery() then
 			BS.bidThrottle       = 0
 			BS.bidQueryPending   = false
 			BS.bidAwaiting       = true
@@ -834,7 +932,7 @@ ev:SetScript("OnUpdate", function(self, elapsed)
 		BS.throttle = BS.throttle + elapsed
 		if BS.throttle < 0.15 then return end
 
-		local canQuery, canQueryAll = CanSendAuctionQuery("list")
+		local canQuery, canQueryAll = CanSendAuctionQuery()
 		if not canQuery then return end
 
 		if BS.useGetAll and not canQueryAll then
@@ -867,6 +965,9 @@ ev:SetScript("OnUpdate", function(self, elapsed)
 				BS.queryIndex      = 1
 				BS.totalPages      = nil
 				BS.scannedCount    = 0
+				-- paging can filter server-side, so hand the categories back
+				BS.queries         = BS:BuildQueries(BS.scanMode)
+				BS.catMatch        = nil
 				BS.awaitingResults = false
 				BS.queryPending    = true
 				BS:SetResults({})
@@ -1940,7 +2041,7 @@ function BS:DumpScanInfo()
 		return
 	end
 
-	local canQuery, canQueryAll = CanSendAuctionQuery("list")
+	local canQuery, canQueryAll = CanSendAuctionQuery()
 	self:Print(format("CanSendAuctionQuery -> query=|cffffffff%s|r  getAll=|cffffffff%s|r",
 		tostring(canQuery), tostring(canQueryAll)))
 
@@ -1988,12 +2089,12 @@ SlashCmdList["BIDSNIPER"] = function(msg)
 		return
 	end
 
-	if msg == "scan" then
-		if BS.frame then BS.frame:Show() end
-		BS:StartScan(true)
-	elseif msg == "newscan" then
+	if msg == "scan" or msg == "newscan" then
 		if BS.frame then BS.frame:Show() end
 		BS:StartScan(false)
+	elseif msg == "resume" then
+		if BS.frame then BS.frame:Show() end
+		BS:StartScan(true)
 	elseif msg == "paged" then
 		BS.db.scanMethod = "paged"
 		BS:Print("Scan method: page by page (slow but always works).")
@@ -2020,8 +2121,8 @@ SlashCmdList["BIDSNIPER"] = function(msg)
 		ReloadUI()
 	elseif msg == "help" then
 		BS:Print("/snipe - toggle the window")
-		BS:Print("/snipe scan - start, or continue an interrupted scan")
-		BS:Print("/snipe newscan - always start a fresh scan")
+		BS:Print("/snipe scan - start a complete new scan")
+		BS:Print("/snipe resume - carry on from where a scan was interrupted")
 		BS:Print("/snipe auto | paged | getall - choose the scan method")
 		BS:Print("/snipe bids - ask the server what you have actually bid on")
 		BS:Print("/snipe syncbids - fix the 'already bid' marks from the server's list")

@@ -174,9 +174,14 @@ qualify. The lower your Max bid, the shorter the scan.
 
 `auto` (the default) uses GetAll when it can and falls back to paging.
 
-GetAll cannot be filtered, so it is **not** used when any category is selected,
-when resuming, or when the method is forced to `paged`. Run `/snipe debug` and
-it will tell you which mode the next scan uses and, if it's paging, exactly why.
+**Categories do not cost you GetAll.** The dump arrives unfiltered, so the
+categories are applied to the results instead — a filtered scan is just as fast
+as an unfiltered one. Occasionally an item is not in your client's cache and
+can't be classified; those are kept rather than dropped, and counted at the end.
+
+GetAll is only skipped when resuming, on a wishlist scan, or when the method is
+forced to `paged`. Run `/snipe debug` and it will tell you which mode the next
+scan uses and, if it's paging, exactly why.
 
 > Don't run Auctionator's or TSM's scanners at the same time — they share the
 > same query channel.
@@ -184,11 +189,11 @@ it will tell you which mode the next scan uses and, if it's paging, exactly why.
 ### Stopping and resuming
 
 If a scan is interrupted — Stop, closing the auction house, or the server going
-quiet — the position is kept along with everything found. The Scan button reads
-**Resume scan**:
+quiet — the position is kept along with everything found, and a **Resume**
+button appears next to Scan AH showing the page it reached.
 
-* **click** — continue, keeping the results so far
-* **right-click / shift-click** — discard and start fresh
+**Scan AH always starts a complete new scan.** Resuming is never forced on you;
+it is the extra button, and it disappears once there is nothing to resume.
 
 This survives `/reload` and relogging. It's a page number, not a bookmark on
 particular auctions, so after a long gap a fresh scan is the honest choice.
@@ -247,8 +252,8 @@ have the next one ready the instant you click. That is what the BID button is.
 | Command | Does |
 | --- | --- |
 | `/snipe` | Toggle the window (`/bidsniper` also works) |
-| `/snipe scan` | Start, or continue an interrupted scan |
-| `/snipe newscan` | Always start fresh |
+| `/snipe scan` | Start a complete new scan |
+| `/snipe resume` | Carry on from where a scan was interrupted |
 | `/snipe auto` \| `paged` \| `getall` | Choose the scan method |
 | `/snipe bids` | Ask the server what you've actually bid on |
 | `/snipe syncbids` | Rebuild the "already bid" marks from the server |

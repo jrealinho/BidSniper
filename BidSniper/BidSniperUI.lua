@@ -272,9 +272,9 @@ function BS:BuildUI()
 	f.wishScanBtn = wishScanBtn
 
 	local rebidBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-	rebidBtn:SetPoint("TOPLEFT", 616, FIELD_Y - 1)
+	rebidBtn:SetPoint("TOPLEFT", 616, FIELD2_Y)
 	rebidBtn:SetWidth(96)
-	rebidBtn:SetHeight(24)
+	rebidBtn:SetHeight(22)
 	rebidBtn:SetText("Re-bid")
 	rebidBtn:SetScript("OnClick", function() BS:RebidOutbid() end)
 	Tip(rebidBtn, "Re-bid where you were outbid",
@@ -289,21 +289,28 @@ function BS:BuildUI()
 	scanBtn:SetWidth(104)
 	scanBtn:SetHeight(24)
 	scanBtn:SetText("Scan AH")
-	scanBtn:RegisterForClicks("LeftButtonUp", "RightButtonUp")
-	scanBtn:SetScript("OnClick", function(self, button)
-		if BS.scanning then
-			BS:StopScan("Scan cancelled.")
-			return
-		end
-		-- a resume point is used unless you deliberately ask for a fresh scan
-		local fresh = (button == "RightButton") or IsShiftKeyDown()
-		BS:StartScan(not fresh)
+	scanBtn:SetScript("OnClick", function()
+		if BS.scanning then BS:StopScan("Scan cancelled.") else BS:StartScan(false) end
 	end)
 	Tip(scanBtn, "Scan the auction house",
-		"Reads the auction house cheapest bid first and stops once bids pass your "
-		.. "Max bid. If a scan was interrupted this reads Resume scan and carries on "
-		.. "from where it stopped, keeping what it already found. Right-click or "
-		.. "shift-click to throw that away and start a fresh scan.")
+		"Always starts a complete new scan, throwing away any earlier results. "
+		.. "Uses GetAll when the realm allows it - the whole house in one request, "
+		.. "categories included. Otherwise it pages through cheapest bid first and "
+		.. "stops once bids pass your Max bid.")
+	f.scanBtn = scanBtn
+
+	-- only offered when there is genuinely something to carry on from
+	local resumeBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+	resumeBtn:SetPoint("TOPRIGHT", -130, FIELD_Y - 1)
+	resumeBtn:SetWidth(96)
+	resumeBtn:SetHeight(24)
+	resumeBtn:SetText("Resume")
+	resumeBtn:SetScript("OnClick", function() BS:StartScan(true) end)
+	Tip(resumeBtn, "Carry on where the last scan stopped",
+		"Picks up from the page an interrupted scan reached, keeping what it "
+		.. "already found. Scan AH beside it always starts over instead.")
+	resumeBtn:Hide()
+	f.resumeBtn = resumeBtn
 
 	local cbNoBids = MakeCheck(f, "Only unbid", COL[1] - 2, CHECK_Y,
 		function() return BS.db.onlyNoBids end,
@@ -561,7 +568,6 @@ function BS:BuildUI()
 
 	f.refreshers = { ratioEdit, maxBidEdit, minBuyEdit, qualityBtn, catBtn,
 	                 cbNoBids, cbSoon, cbOwn, cbAuto }
-	f.scanBtn = scanBtn
 
 	-- /snipe debug prints where these actually ended up on screen
 	f.debug = {
@@ -1043,12 +1049,16 @@ function BS:UpdateUI()
 	local f = self.frame
 	if not f then return end
 
-	if self.scanning then
-		f.scanBtn:SetText("Stop")
-	elseif self.db.resume then
-		f.scanBtn:SetText("Resume scan")
+	f.scanBtn:SetText(self.scanning and "Stop" or "Scan AH")
+
+	-- Resume only appears when a scan was actually interrupted, and never
+	-- replaces Scan AH: a full scan must always be one click away.
+	local res, nextPage = self:ResumeInfo()
+	if res and not self.scanning then
+		f.resumeBtn:SetText("Resume p" .. nextPage)
+		f.resumeBtn:Show()
 	else
-		f.scanBtn:SetText("Scan AH")
+		f.resumeBtn:Hide()
 	end
 
 	local selected, available, selTotal = self:CountSelected()
