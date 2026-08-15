@@ -212,6 +212,26 @@ function BS:BuildUI()
 		return (color and color.hex or "") .. name .. "|r"
 	end
 
+	--[[
+		Min profit governs which rows a bulk tick will take, not what a scan
+		keeps. Profit depends on Auctionator's prices, which can arrive after
+		a scan has already run, so filtering results on it would throw away
+		auctions that turn out to be the good ones.
+	]]
+	local PROFIT_X = 616
+	local lblMinProfit = MakeLabel(f, "Min profit", PROFIT_X, LABEL_Y)
+	local minProfitEdit = MakeMoneyEdit(f, PROFIT_X, FIELD_Y, 96,
+		function() return BS.db.minProfit end,
+		function(v) BS.db.minProfit = v end,
+		"Minimum profit to tick",
+		"Select all, shift-click ranges and dragging across the boxes skip anything "
+		.. "worth less than this over its bid. 0 = tick everything.\n\n"
+		.. "It compares against the figure in the Profit column, which counts the "
+		.. "whole row - a row of eight worth 20g each clears a 100g bar.\n\n"
+		.. "Items Auctionator has no price for are skipped too: this is where gold "
+		.. "actually gets spent, and an unknown value is not a reason to bid.\n\n"
+		.. "It never hides a row, and never stops you ticking one by hand.")
+
 	-- a plain button rather than a dropdown: predictable size, nothing to skin
 	local lblQuality = MakeLabel(f, "Min quality", COL[4], LABEL_Y)
 	local qualityBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
@@ -283,6 +303,23 @@ function BS:BuildUI()
 		.. "Auctions that have climbed past your Max bid, or past their own buyout, "
 		.. "are left alone and reported.")
 	f.rebidBtn = rebidBtn
+
+	local myBidsBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+	myBidsBtn:SetPoint("TOPLEFT", 716, FIELD2_Y)
+	myBidsBtn:SetWidth(104)
+	myBidsBtn:SetHeight(22)
+	myBidsBtn:SetText("My bids")
+	myBidsBtn:SetScript("OnClick", function()
+		if not BS.ledgerFrame then BS:NoLedger() return end
+		if BS.ledgerFrame:IsShown() then BS.ledgerFrame:Hide() else BS.ledgerFrame:Show() end
+	end)
+	Tip(myBidsBtn, "Every bid you have placed",
+		"Kept through logging out, which the auction house itself does not do: the "
+		.. "Bids tab only ever shows auctions you are currently winning, so anything "
+		.. "you were outbid on while away vanishes from it without trace. This list "
+		.. "remembers, and tells you which ones you won, which you lost, and which "
+		.. "are still sitting there waiting to be bid on again.")
+	f.myBidsBtn = myBidsBtn
 
 	local scanBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
 	scanBtn:SetPoint("TOPRIGHT", -18, FIELD_Y - 1)
@@ -415,7 +452,8 @@ function BS:BuildUI()
 		end)
 		row.check:SetScript("OnEnter", function(self)
 			if BS.dragging and row.result then
-				BS:ApplySelect(row.result, BS.dragState)
+				-- dragging paints rows you have not looked at, so it is bulk
+				BS:ApplySelect(row.result, BS.dragState, true)
 				BS.lastTickIndex = row.resultIndex or BS.lastTickIndex
 				BS:UpdateUI()
 			end
@@ -452,6 +490,7 @@ function BS:BuildUI()
 		row:SetScript("OnEnter", function(self)
 			local r = self.result
 			if not r then return end
+			BS:FillValue(r)		-- the breakdown below needs the per-auction figures
 			GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
 			if r.link then
 				GameTooltip:SetHyperlink(r.link)
@@ -464,10 +503,27 @@ function BS:BuildUI()
 			if r.count > 1 then
 				GameTooltip:AddDoubleLine("Bid per item", BS.Money(r.bid / r.count), 0.8, 0.8, 0.8)
 			end
+			local left = BS:CopiesLeft(r)
+			if (r.copies or 1) > 1 or r.counted then
+				GameTooltip:AddDoubleLine(r.counted and "Up right now" or "Identical auctions up",
+					format("%d  (%s the lot)", left, BS.Money(r.bid * left)), 1, 0.82, 0)
+			end
 			if r.profit then
-				GameTooltip:AddDoubleLine("Market value", BS.Money(r.market), 0.8, 0.8, 0.8)
-				GameTooltip:AddDoubleLine("Profit over bid", BS.Money(r.profit), 0.2, 1, 0.2)
-				GameTooltip:AddDoubleLine("After 5% AH cut", BS.Money(r.market * 0.95 - r.bid), 0.6, 0.6, 0.6)
+				-- the columns carry the whole row; here is the arithmetic behind
+				-- them, one auction at a time when there is more than one
+				if left > 1 then
+					GameTooltip:AddDoubleLine("Market value, each",
+						BS.Money(r.unitMarket or 0), 0.8, 0.8, 0.8)
+					GameTooltip:AddDoubleLine("Profit over bid, each",
+						BS.Money(r.unitProfit or 0), 0.6, 0.9, 0.6)
+					GameTooltip:AddDoubleLine(format("All %d together", left),
+						BS.Money(r.profit), 0.2, 1, 0.2)
+				else
+					GameTooltip:AddDoubleLine("Market value", BS.Money(r.market), 0.8, 0.8, 0.8)
+					GameTooltip:AddDoubleLine("Profit over bid", BS.Money(r.profit), 0.2, 1, 0.2)
+				end
+				GameTooltip:AddDoubleLine("After 5% AH cut",
+					BS.Money(r.market * 0.95 - r.bid * left), 0.6, 0.6, 0.6)
 			else
 				GameTooltip:AddLine("Auctionator has no price for this item -", 1, 0.5, 0.2)
 				GameTooltip:AddLine("the buyout alone proves nothing.", 1, 0.5, 0.2)
@@ -480,7 +536,16 @@ function BS:BuildUI()
 				GameTooltip:AddLine("Scanned a while ago - may already be gone.", 1, 0.5, 0.2)
 			end
 			if r.bidPlaced then
-				GameTooltip:AddLine("You have already bid on this one.", 0.2, 1, 0.2)
+				if (r.copies or 1) > 1 then
+					GameTooltip:AddLine(format("You have bid on %d of these %d.",
+						r.bidsDone or 0, r.copies), 0.2, 1, 0.2)
+				else
+					GameTooltip:AddLine("You have already bid on this one.", 0.2, 1, 0.2)
+				end
+			end
+			if (r.copies or 1) > 1 then
+				GameTooltip:AddLine("Ticking this row bids on every copy still up;", 0.6, 0.9, 1)
+				GameTooltip:AddLine("clicking it bids on one of them.", 0.6, 0.9, 1)
 			end
 			GameTooltip:AddLine("Tick box: drag to paint, shift-tick for a range", 0.6, 0.9, 1)
 			GameTooltip:AddLine("Click: bid " .. BS.Money(r.bid) .. " (asks to confirm)", 0.6, 0.9, 1)
@@ -565,15 +630,17 @@ function BS:BuildUI()
 
 	self:BuildWishlistUI(f)
 	self:BuildCategoryUI(f)
+	self:BuildLedgerUI(f)
 
-	f.refreshers = { ratioEdit, maxBidEdit, minBuyEdit, qualityBtn, catBtn,
-	                 cbNoBids, cbSoon, cbOwn, cbAuto }
+	f.refreshers = { ratioEdit, maxBidEdit, minBuyEdit, minProfitEdit, qualityBtn,
+	                 catBtn, cbNoBids, cbSoon, cbOwn, cbAuto }
 
 	-- /snipe debug prints where these actually ended up on screen
 	f.debug = {
 		{ "lbl ratio",   lblRatio   }, { "box ratio",   ratioEdit  },
 		{ "lbl maxbid",  lblMaxBid  }, { "box maxbid",  maxBidEdit },
 		{ "lbl minbuy",  lblMinBuy  }, { "box minbuy",  minBuyEdit },
+		{ "lbl profit",  lblMinProfit }, { "box profit", minProfitEdit },
 		{ "lbl quality", lblQuality }, { "btn quality", qualityBtn },
 		{ "btn scan",    scanBtn    },
 	}
@@ -609,7 +676,8 @@ function BS:BuildCategoryUI(parent)
 
 	-- only one side panel at a time, they share the same spot
 	c:SetScript("OnShow", function()
-		if BS.wishFrame then BS.wishFrame:Hide() end
+		if BS.wishFrame   then BS.wishFrame:Hide()   end
+		if BS.ledgerFrame then BS.ledgerFrame:Hide() end
 		BS:RefreshCategories()
 	end)
 
@@ -840,7 +908,8 @@ function BS:BuildWishlistUI(parent)
 	w:EnableMouse(true)
 	w:Hide()
 	w:SetScript("OnShow", function()
-		if BS.catFrame then BS.catFrame:Hide() end
+		if BS.catFrame    then BS.catFrame:Hide()    end
+		if BS.ledgerFrame then BS.ledgerFrame:Hide() end
 		BS:RefreshWishlist()
 	end)
 
@@ -956,6 +1025,272 @@ function BS:RefreshWishlist()
 end
 
 --=============================================================================
+--  bid ledger panel
+--=============================================================================
+
+local LEDGER_ROWS, LEDGER_ROW_H = 12, 22
+
+-- outbid first: it is the only state you can still do something about
+local STATE_ORDER = {
+	outbid = 1, missing = 2, pending = 3, leading = 4, won = 5, lost = 6, ended = 7,
+}
+
+function BS:BuildLedgerUI(parent)
+	-- no ledger loaded, no panel: the My bids button explains why instead
+	if not self:HasLedger() then return end
+
+	local g = CreateFrame("Frame", "BidSniperLedgerFrame", parent)
+	g:SetWidth(460)
+	g:SetHeight(400)
+	g:SetPoint("TOPLEFT", parent, "TOPRIGHT", 4, 0)
+	g:SetFrameStrata("HIGH")
+	g:SetToplevel(true)
+	g:SetBackdrop({
+		bgFile   = "Interface\\DialogFrame\\UI-DialogBox-Background",
+		edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
+		tile = true, tileSize = 32, edgeSize = 32,
+		insets = { left = 11, right = 12, top = 12, bottom = 11 },
+	})
+	g:EnableMouse(true)
+	g:Hide()
+	g:SetScript("OnShow", function()
+		if BS.catFrame  then BS.catFrame:Hide()  end
+		if BS.wishFrame then BS.wishFrame:Hide() end
+		BS:RefreshLedger()
+	end)
+
+	local title = g:CreateFontString(nil, "ARTWORK")
+	Font(title, 12, 1, 0.82, 0)
+	title:SetPoint("TOP", 0, -14)
+	title:SetText("My bids")
+
+	local close = CreateFrame("Button", nil, g, "UIPanelCloseButton")
+	close:SetPoint("TOPRIGHT", -6, -6)
+
+	local help = g:CreateFontString(nil, "ARTWORK")
+	Font(help, 10, 0.6, 0.6, 0.6)
+	help:SetPoint("TOPLEFT", 18, -36)
+	help:SetWidth(420)
+	help:SetJustifyH("LEFT")
+	help:SetText("Every bid you place is kept here through logging out. "
+		.. "Click a row to look the auction up in Browse.")
+
+	-- column headers
+	local heads = { { "", 2, 56 }, { "Item", 60, 170 }, { "You bid", 232, 84 },
+	                { "Costs now", 320, 84 }, { "", 408, 20 } }
+	for _, h in ipairs(heads) do
+		if h[1] ~= "" then
+			local fs = g:CreateFontString(nil, "ARTWORK")
+			Font(fs, 10, 0.8, 0.8, 0.8)
+			fs:SetPoint("TOPLEFT", 18 + h[2], -66)
+			fs:SetWidth(h[3])
+			fs:SetJustifyH(h[2] >= 232 and "RIGHT" or "LEFT")
+			fs:SetText(h[1])
+		end
+	end
+
+	local scroll = CreateFrame("ScrollFrame", "BidSniperLedgerScroll", g, "FauxScrollFrameTemplate")
+	scroll:SetPoint("TOPLEFT", 18, -80)
+	scroll:SetWidth(404)
+	scroll:SetHeight(LEDGER_ROWS * LEDGER_ROW_H)
+	scroll:SetScript("OnVerticalScroll", function(self, offset)
+		FauxScrollFrame_OnVerticalScroll(self, offset, LEDGER_ROW_H, function() BS:RefreshLedger() end)
+	end)
+	g.scroll = scroll
+
+	g.rows = {}
+	for i = 1, LEDGER_ROWS do
+		local row = CreateFrame("Button", nil, g)
+		row:SetWidth(404)
+		row:SetHeight(LEDGER_ROW_H)
+		if i == 1 then
+			row:SetPoint("TOPLEFT", scroll, "TOPLEFT", 0, 0)
+		else
+			row:SetPoint("TOPLEFT", g.rows[i - 1], "BOTTOMLEFT", 0, 0)
+		end
+
+		row:SetHighlightTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight")
+
+		row.cells = {}
+		local layout = { { 2, 56, "LEFT" }, { 60, 170, "LEFT" },
+		                 { 232, 84, "RIGHT" }, { 320, 84, "RIGHT" } }
+		for c, l in ipairs(layout) do
+			local fs = row:CreateFontString(nil, "ARTWORK")
+			Font(fs, 11, 1, 1, 1)
+			fs:SetPoint("LEFT", l[1], 0)
+			fs:SetWidth(l[2])
+			fs:SetJustifyH(l[3])
+			row.cells[c] = fs
+		end
+
+		row:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+		row:SetScript("OnClick", function(self, button)
+			if not self.entry then return end
+			if button == "RightButton" then
+				BS:LedgerForget(self.entry)
+			else
+				BS:SearchInBrowse(self.entry)
+			end
+		end)
+		row:SetScript("OnEnter", function(self)
+			if not self.entry then return end
+			local e = self.entry
+			GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+			GameTooltip:SetText(e.link or e.name, 1, 1, 1)
+			GameTooltip:AddLine(e.note or "", 0.8, 0.8, 0.8, true)
+			GameTooltip:AddLine(" ")
+			GameTooltip:AddDoubleLine("Seller", e.owner or "unknown", 0.7, 0.7, 0.7, 1, 1, 1)
+			GameTooltip:AddDoubleLine("Starting bid", BS.Money(e.minBid), 0.7, 0.7, 0.7, 1, 1, 1)
+			GameTooltip:AddDoubleLine("Buyout", BS.Money(e.buyout), 0.7, 0.7, 0.7, 1, 1, 1)
+			GameTooltip:AddDoubleLine("You bid", BS.Money(e.myBid), 0.7, 0.7, 0.7, 1, 1, 1)
+			if (e.copies or 1) > 1 then
+				-- identical auctions share a key, so they share an entry; what
+				-- left your bags is that bid times this many
+				GameTooltip:AddDoubleLine("Identical auctions bid on",
+					format("%d  (%s in all)", e.copies, BS.Money(e.myBid * e.copies)),
+					0.7, 0.7, 0.7, 1, 0.82, 0)
+			end
+			if e.placed then
+				GameTooltip:AddDoubleLine("Bid placed", BS.Ago(e.placed), 0.7, 0.7, 0.7, 1, 1, 1)
+			end
+			GameTooltip:AddLine(" ")
+			GameTooltip:AddLine("Click to search for it in Browse.", 0.5, 0.8, 1)
+			GameTooltip:AddLine("Right-click to remove it from this list.", 0.5, 0.8, 1)
+			GameTooltip:Show()
+		end)
+		row:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
+		row:Hide()
+		g.rows[i] = row
+	end
+
+	local checkBtn = CreateFrame("Button", nil, g, "UIPanelButtonTemplate")
+	checkBtn:SetPoint("BOTTOMLEFT", 18, 18)
+	checkBtn:SetWidth(110)
+	checkBtn:SetHeight(24)
+	checkBtn:SetText("Check now")
+	checkBtn:SetScript("OnClick", function() BS:CheckBids(false) end)
+	Tip(checkBtn, "The fast check",
+		"Reads your Bids tab and your mail, and asks the auction house for nothing at "
+		.. "all - so it answers immediately. Your mail is the useful part: being "
+		.. "outbid puts your gold straight back in the post, and that mail sits there "
+		.. "for thirty days whether you log out or not.")
+
+	local findBtn = CreateFrame("Button", nil, g, "UIPanelButtonTemplate")
+	findBtn:SetPoint("BOTTOMLEFT", 134, 18)
+	findBtn:SetWidth(110)
+	findBtn:SetHeight(24)
+	findBtn:SetText("Find on AH")
+	findBtn:SetScript("OnClick", function() BS:StartLedgerSweep(false) end)
+	Tip(findBtn, "The slow check",
+		"Searches the auction house for each bid still unaccounted for, one item name "
+		.. "at a time. It is the only way to be certain, and it is slow - a full scan "
+		.. "settles the same bids for nothing on its way past, so try Scan AH first.")
+
+	local clearBtn = CreateFrame("Button", nil, g, "UIPanelButtonTemplate")
+	clearBtn:SetPoint("BOTTOMLEFT", 250, 18)
+	clearBtn:SetWidth(110)
+	clearBtn:SetHeight(24)
+	clearBtn:SetText("Clear settled")
+	clearBtn:SetScript("OnClick", function() BS:ClearSettledBids() end)
+	Tip(clearBtn, "Tidy up", "Removes everything that has been won, lost or ended. "
+		.. "Settled bids are cleared on their own after a fortnight anyway.")
+
+	local count = g:CreateFontString(nil, "ARTWORK")
+	Font(count, 11, 0.7, 0.7, 0.7)
+	count:SetPoint("BOTTOMRIGHT", -18, 24)
+	g.count = count
+
+	self.ledgerFrame = g
+end
+
+function BS:ShowLedger()
+	if not self.frame then return end
+	self.frame:Show()
+	local g = self.ledgerFrame
+	if not g then return end
+	if g:IsShown() then g:Hide() else g:Show() end
+end
+
+function BS:ClearSettledBids()
+	if not self:HasLedger() then self:NoLedger() return end
+	local log, removed = self:Ledger(), 0
+	for i = #log, 1, -1 do
+		if BS.LedgerClosed(log[i]) then
+			table.remove(log, i)
+			removed = removed + 1
+		end
+	end
+	self:Print(format("Cleared %d settled bid%s.", removed, removed == 1 and "" or "s"))
+	self:RefreshLedger()
+end
+
+--[[
+	Sorted so the states you can act on sit at the top: an auction you were
+	outbid on is still there to be won, and that is the whole point of keeping
+	this record.
+]]
+function BS:LedgerSorted()
+	local list = {}
+	if not self:HasLedger() then return list end
+	local who = BS.LedgerOwner()
+	for _, e in ipairs(self:Ledger()) do
+		if e.char == who then list[#list + 1] = e end
+	end
+	table.sort(list, function(a, b)
+		local oa = STATE_ORDER[a.state] or 9
+		local ob = STATE_ORDER[b.state] or 9
+		if oa ~= ob then return oa < ob end
+		return (a.stateAt or a.placed or 0) > (b.stateAt or b.placed or 0)
+	end)
+	return list
+end
+
+function BS:RefreshLedger()
+	local g = self.ledgerFrame
+	if not g or not g:IsShown() then return end
+
+	local list   = self:LedgerSorted()
+	local offset = FauxScrollFrame_GetOffset(g.scroll) or 0
+
+	for i = 1, LEDGER_ROWS do
+		local row = g.rows[i]
+		local e   = list[offset + i]
+		if e then
+			row.entry = e
+			local color = ITEM_QUALITY_COLORS[e.quality] or ITEM_QUALITY_COLORS[1]
+			local label = (color and color.hex or "") .. e.name .. "|r"
+			if e.count > 1 then label = label .. " |cffaaaaaax" .. e.count .. "|r" end
+			if (e.copies or 1) > 1 then
+				label = label .. format("  |cffffd100(%d of them)|r", e.copies)
+			end
+
+			row.cells[1]:SetText(BS.ledgerStateText[e.state] or e.state)
+			row.cells[2]:SetText(label)
+			row.cells[3]:SetText(BS.Money(e.myBid))
+			-- what it would cost to take the lead back, when we know it
+			if e.state == "outbid" and e.nextBid and e.nextBid > 0 then
+				row.cells[4]:SetText("|cffff8800" .. BS.Money(e.nextBid) .. "|r")
+			elseif e.state == "leading" then
+				row.cells[4]:SetText("|cff00ff00ahead|r")
+			else
+				row.cells[4]:SetText("|cff666666-|r")
+			end
+			row:Show()
+		else
+			row.entry = nil
+			row:Hide()
+		end
+	end
+
+	local counts = self:LedgerSummary()
+	g.count:SetText(format("%d winning, %d outbid, %d on file",
+		counts.leading or 0, counts.outbid or 0, #list))
+
+	FauxScrollFrame_Update(g.scroll, #list, LEDGER_ROWS, LEDGER_ROW_H)
+end
+
+--=============================================================================
 --  refreshing
 --=============================================================================
 
@@ -1047,7 +1382,10 @@ end
 
 function BS:UpdateUI()
 	local f = self.frame
-	if not f then return end
+	-- Nothing here does anything but paint, and OnShow repaints from scratch,
+	-- so a closed window is work with nowhere to land. The ledger pane already
+	-- bows out the same way.
+	if not f or not f:IsShown() then return end
 
 	f.scanBtn:SetText(self.scanning and "Stop" or "Scan AH")
 
@@ -1061,7 +1399,7 @@ function BS:UpdateUI()
 		f.resumeBtn:Hide()
 	end
 
-	local selected, available, selTotal = self:CountSelected()
+	local selected, available, selTotal, selAuctions = self:CountSelected()
 
 	if self.armed then
 		-- one click, one bid: the button shows exactly what it is about to spend
@@ -1089,10 +1427,20 @@ function BS:UpdateUI()
 		f.selCount:SetText(format("|cffffd100click BID  -  %d of %d done|r",
 			self.batchDone or 0, #self.batch))
 	elseif selected > 0 then
-		f.selCount:SetText(format("%d of %d selected  -  %s",
-			selected, available, BS.Money(selTotal)))
+		-- ticked rows and the auctions behind them are different numbers as soon
+		-- as one deal has copies, so show both rather than a figure that looks
+		-- wrong against the total
+		local rows = (selAuctions > selected)
+			and format("%d of %d selected (%d auctions)", selected, available, selAuctions)
+			or  format("%d of %d selected", selected, available)
+		f.selCount:SetText(format("%s  -  %s", rows, BS.Money(selTotal)))
 	elseif available > 0 then
 		f.selCount:SetText(format("|cff888888none of %d selected|r", available))
+	elseif #self.results > 0 and (self.db.minProfit or 0) > 0 then
+		-- nothing tickable and rows on screen: say which filter did it, or the
+		-- Select all button looks broken
+		f.selCount:SetText(format("|cffff8800none clear %s profit|r",
+			BS.MoneyPlain(self.db.minProfit)))
 	else
 		f.selCount:SetText("")
 	end
@@ -1126,6 +1474,21 @@ function BS:UpdateUI()
 			local label = (expired and "|cff777777" or (color and color.hex or ""))
 			              .. r.name .. "|r"
 			if r.count > 1 then label = label .. " |cffaaaaaax" .. r.count .. "|r" end
+			-- x20 is the stack, "4 up" is how many identical auctions there are:
+			-- one row stands for the lot, so say so rather than listing it four
+			-- times and leaving you to wonder which is which
+			local copies, done = r.copies or 1, r.bidsDone or 0
+			if r.counted and copies - done <= 0 then
+				-- a counted row with nothing left is either finished or taken,
+				-- and which of the two is worth saying
+				label = label .. (done > 0
+					and format("  |cff00ff00(all %d bid)|r", done)
+					or  "  |cff888888(none left)|r")
+			elseif copies > 1 then
+				label = label .. (done > 0
+					and format("  |cffffd100(%d of %d up bid)|r", done, copies)
+					or  format("  |cffffd100(%d up)|r", copies))
+			end
 			if r.bidPlaced then
 				label = "|cff00ff00*|r " .. label
 			elseif r.bidPending then

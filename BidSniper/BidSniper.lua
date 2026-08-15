@@ -19,10 +19,12 @@ BS.defaults = {
 	maxBid      = 500000,		-- copper; 0 = no limit  (default 50g)
 	minBuyout   = 10000,		-- copper; ignore junk    (default 1g)
 	minQuality  = 0,		-- 0 = poor and up
+	minProfit   = 0,		-- copper; Select all skips rows worth less than this
 	hideOwn     = true,		-- hide my own auctions / auctions I lead
 	onlyNoBids  = false,		-- only auctions nobody has bid on yet
 	endingSoon  = false,		-- only time left Short or Medium
 	autoShow    = true,		-- open the window with the auction house
+	autoCheckBids = true,		-- reconcile the bid ledger on arriving at the AH
 	scanMethod  = "auto",		-- auto | paged | getall
 	categories  = {},		-- set of auction class indices; empty = all of them
 	subcats     = {},		-- class index -> set of subclass indices
@@ -30,6 +32,7 @@ BS.defaults = {
 	wishlist    = {},		-- item names to check on a wishlist scan
 	priceCache  = {},		-- item name -> { v = unit price, t = when }
 	knownChars  = {},		-- every character of yours that has logged in
+	bidLog      = {},		-- every bid placed, and what became of it
 	sortKey     = "ratio",
 	sortDesc    = true,
 	point       = nil,		-- window position
@@ -47,6 +50,27 @@ local floor, format, sort = math.floor, string.format, table.sort
 
 function BS:Print(msg)
 	DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99BidSniper|r: " .. tostring(msg))
+end
+
+--[[
+	Is the bid ledger actually loaded?
+
+	WoW reads an addon's file list from the .toc once, when the client starts.
+	/reload re-runs the files already on that list but never notices a new one,
+	so a BidSniperLedger.lua added mid-session is simply not there however many
+	times you reload - the client has to be restarted.
+
+	Everything that touches the ledger asks this first, so that case costs you
+	one clear line instead of a nil-call from every direction.
+]]
+function BS:HasLedger()
+	return type(self.Ledger) == "function"
+end
+
+function BS:NoLedger()
+	self:Print("|cffff4444The bid ledger did not load.|r BidSniperLedger.lua is listed "
+		.. "in the .toc, but WoW only reads that list when the client starts - "
+		.. "|cffffd700fully exit and restart the game|r. A /reload will not do it.")
 end
 
 -- 1234567 -> "1,234,567"
@@ -122,6 +146,9 @@ BS.timeLeftText = { "|cffff5555<30m|r", "|cffffcc00<2h|r", "<12h", ">12h" }
 -- Once a result is older than its bracket the auction has certainly ended,
 -- whether it sold, was bought out, or was cancelled.
 local MAX_LIFE = { 30 * 60, 2 * 3600, 12 * 3600, 48 * 3600 }
+
+-- the bid ledger bounds its own entries the same way
+BS.MAX_LIFE = MAX_LIFE
 
 function BS.Expired(r)
 	if not r.seen then return false end		-- scanned before we recorded ages
@@ -199,16 +226,38 @@ function BS:CachedUnitPrice(r)
 	return unit
 end
 
--- market value of the whole stack, and what you would make over the bid.
--- Both stay nil when there is no price: an unknown item must not read as a
--- huge loss, and it must not read as a huge win either.
+--[[
+	What the row is worth and what you stand to make on it.
+
+	Both count the whole row. A row is one deal and stands for every identical
+	auction at its price, so eight bags worth 60g over the bid each are a 480g
+	row - and sorting by Profit is how you decide what to go for, which only
+	works if the number is the whole opportunity rather than one eighth of it.
+
+	`unitMarket` and `unitProfit` keep the per-auction figures for the tooltip,
+	which is where the arithmetic gets shown.
+
+	Counted from what is *left*: bidding four of the eight leaves four still to
+	take, and the row's remaining opportunity is what the column is for. Both
+	stay nil when there is no price - an unknown item must not read as a huge
+	loss, and it must not read as a huge win either.
+]]
 function BS:FillValue(r)
-	if r.market ~= nil then return end
+	local left = self:CopiesLeft(r)
+
+	-- the multiplier moves as copies are found and bid on, so a filled row is
+	-- only still valid for the number it was filled for
+	if r.market ~= nil and r.valueFor == left then return end
+	r.valueFor = left
+
 	local unit = self:CachedUnitPrice(r)
 	if unit then
-		r.market = unit * r.count
-		r.profit = r.market - r.bid
+		r.unitMarket = unit * r.count
+		r.unitProfit = r.unitMarket - r.bid
+		r.market     = r.unitMarket * left
+		r.profit     = r.unitProfit * left
 	else
+		r.unitMarket, r.unitProfit = 0, nil
 		r.market = 0
 		r.profit = nil
 	end
@@ -272,7 +321,30 @@ local ev = CreateFrame("Frame", "BidSniperEventFrame")
 function BS:SetResults(t)
 	self.results = t
 	self.lastTickIndex = nil		-- old row numbers mean nothing now
+
+	-- the index a scan uses to spot a deal it already has a row for, rebuilt
+	-- here so a resumed scan groups its new rows with the ones already listed
+	self.resultKeys = {}
+	for _, r in ipairs(t) do
+		if r.groupKey then self.resultKeys[r.groupKey] = r end
+	end
+
 	if BidSniperDB then BidSniperDB.lastResults = t end
+end
+
+--[[
+	How many of this deal are still worth a bid: what the last count found, less
+	what we have bid on since.
+
+	A scan's count is only ever a floor - it is the number that gets stepped
+	over - so a row carrying one is always worth at least one attempt, and the
+	lookup at bid time settles it. A count taken from a fresh search of that one
+	item is a real answer, and when it says none are left that is believed.
+]]
+function BS:CopiesLeft(r)
+	local left = (r.copies or 1) - (r.bidsDone or 0)
+	if r.counted then return math.max(0, left) end
+	return math.max(1, left)
 end
 
 -- Ask the server to sort the browse list by current bid, cheapest first.
@@ -460,9 +532,16 @@ function BS:BuildCategoryMatcher()
 	return matcher
 end
 
--- Item class and subclass, cached by name: a full sweep sees the same items
--- over and over, and GetItemInfo is far too slow to call per auction.
-function BS:ItemClass(name, link)
+--[[
+	Item class and subclass, cached by name: a full sweep sees the same items
+	over and over, and GetItemInfo is far too slow to call per auction.
+
+	Takes the row index rather than the link, so the link is built only when the
+	cache misses. It used to be built by the caller for every row, which meant a
+	GetAll paid for forty thousand item links to answer a question the cache had
+	already answered for all but a few hundred of them.
+]]
+function BS:ItemClass(name, index)
 	local cache = self.classCache
 	if not cache then cache = {} self.classCache = cache end
 
@@ -472,6 +551,7 @@ function BS:ItemClass(name, link)
 		return hit[1], hit[2]
 	end
 
+	local link = index and GetAuctionItemLink("list", index)
 	local _, _, _, _, _, itemType, itemSubType = GetItemInfo(link or name)
 	if itemType then
 		cache[name] = { itemType, itemSubType }
@@ -557,6 +637,10 @@ function BS:StartScan(resume, mode)
 	mode = res and res.mode or mode or "normal"
 	self.scanMode = mode
 
+	-- every row this scan reads gets checked against the bid ledger on its way
+	-- past, which costs nothing and is the quickest way to settle a bid
+	if self:HasLedger() then self:BuildLedgerWatch() end
+
 	-- Decide the method before building the queries: a GetAll is a single
 	-- request whatever the filters say, and the categories get applied to the
 	-- results instead.
@@ -570,6 +654,9 @@ function BS:StartScan(resume, mode)
 	-- like the addon is broken, so say which one it is and why.
 	if self.useGetAll then
 		self:Print("|cff00ff00Fast scan|r (GetAll) - the whole auction house in one request.")
+	elseif method == "thorough" then
+		self:Print("|cff00ff00Thorough scan|r - every page, unsorted, no early stop. "
+			.. "Slow, but it will not step over auctions.")
 	else
 		local why
 		if res then
@@ -583,7 +670,8 @@ function BS:StartScan(resume, mode)
 		else
 			why = "GetAll is unavailable"
 		end
-		self:Print("|cffff8800Paged scan|r - " .. why .. ".")
+		self:Print("|cffff8800Paged scan|r - " .. why
+			.. ". This can step over auctions; |cffffffff/snipe thorough|r reads every one.")
 	end
 
 	if self.useGetAll then
@@ -642,11 +730,28 @@ function BS:StartScan(resume, mode)
 	self.processing     = false
 	self.scanStart      = GetTime()
 
-	-- A GetAll dump comes back unsorted, so sorting only makes sense per page.
-	-- Cheapest bid first means the auctions you care about arrive first, and
-	-- once bids pass your max bid there is nothing left worth reading.
+	--[[
+		Whether to have the server sort the list before we page through it.
+
+		Sorting cheapest-bid-first is what makes a paged scan quick: the
+		auctions you care about arrive first, and once bids pass your max bid
+		nothing later is worth reading.
+
+		It also makes a paged scan lossy, and in a very specific way. Paging
+		walks a live server-side list by index, so anything posted, bought or
+		bid on mid-scan shifts every later row and a page boundary swallows
+		whatever it stepped over. Sorting by bid makes that far worse, because
+		auctions sharing a bid are tied: several identical listings from one
+		seller sit adjacent with no stable order between one page request and
+		the next, so a boundary landing inside that run drops part of it. Five
+		identical orbs going in and one coming out is exactly this.
+
+		"thorough" gives that up - no sort, no early stop, every page read - in
+		exchange for seeing everything. GetAll sidesteps the whole problem by
+		not paging at all, and is still the best answer where it is available.
+	]]
 	self.sorted = false
-	if self.useGetAll then
+	if self.useGetAll or self.db.scanMethod == "thorough" then
 		SortAuctionClearSort("list")
 	else
 		self.sorted = self:ApplyBidSort()
@@ -664,6 +769,10 @@ function BS:StopScan(reason)
 	self.queryPending = false
 	self.awaitingResults = false
 	self.processing   = false
+
+	-- a scan that stopped part way proves nothing about what it never reached,
+	-- so it keeps what it found and closes nothing
+	if self:HasLedger() then self:LedgerScanFinished(false) end
 
 	self:SaveResume()
 	local res, nextPage, pages = self:ResumeInfo()
@@ -689,10 +798,28 @@ function BS:FinishScan()
 	self.db.lastScanTime = time()
 	self.db.resume       = nil		-- finished: nothing left to resume
 
+	--[[
+		Only a scan that read every auction can prove one is gone. GetAll always
+		does; a paged scan does too, but only with no categories narrowing it
+		and no early stop at your max bid. A wishlist or resumed scan never
+		does. Anything less did not look everywhere, so it settles what it found
+		and stays quiet about what it did not.
+	]]
+	if self:HasLedger() then
+		self:LedgerScanFinished(self.scanMode == "normal" and not self.stoppedEarly
+			and (self.useGetAll or #self:ActiveClasses() == 0))
+	end
+
+	-- identical auctions share a row, so the row count and the number of
+	-- auctions behind it are different figures and both are worth saying
+	local copies = 0
+	for _, r in ipairs(self.results) do copies = copies + (r.copies or 1) end
+
 	local secs = GetTime() - (self.scanStart or GetTime())
-	self:SetStatus(format("%d match%s in %s auctions  (%.0fs)%s%s",
+	self:SetStatus(format("%d match%s%s in %s auctions  (%.0fs)%s%s",
 		#self.results,
 		#self.results == 1 and "" or "es",
+		copies > #self.results and format(" (%d auctions)", copies) or "",
 		BS.Comma(self.scannedCount),
 		secs,
 		self.stoppedEarly and "  |cff00ff00[stopped at your max bid]|r" or "",
@@ -716,32 +843,50 @@ function BS:Evaluate(index)
 	local name, texture, count, quality, canUse, level, minBid, minIncrement,
 	      buyoutPrice, bidAmount, highBidder, owner = GetAuctionItemInfo("list", index)
 
-	if not name or not buyoutPrice or buyoutPrice <= 0 then return end
+	if not name then return end
 
 	count        = count or 1
 	bidAmount    = bidAmount or 0
 	minIncrement = minIncrement or 0
 	minBid       = minBid or 0
+	buyoutPrice  = buyoutPrice or 0
+
+	--[[
+		Settle bid-ledger entries from rows the scan was reading anyway. This
+		sits ahead of every filter and ahead of the no-buyout guard on purpose:
+		an auction you bid on is worth recognising whether or not it still
+		passes your ratio, your max bid or your categories, and a bid you placed
+		by hand on an auction with no buyout is still a bid. The name check
+		first keeps this to one string lookup for the overwhelming majority of
+		rows.
+	]]
+	if self.ledgerWatchNames and self.ledgerWatchNames[name] then
+		self:LedgerSawAuction(
+			BS.BidKey(GetAuctionItemLink("list", index), name, count, minBid, buyoutPrice),
+			minBid, bidAmount, minIncrement, highBidder)
+	end
+
+	-- no buyout, no ratio: nothing here can judge whether it is a bargain
+	if buyoutPrice <= 0 then return end
 
 	-- what you would actually have to pay to be the high bidder right now
 	local bid = (bidAmount > 0) and (bidAmount + minIncrement) or minBid
 	if bid <= 0 or bid >= buyoutPrice then return end
 
-	-- category filtering for a GetAll, which the server hands over unfiltered
-	if self.catMatch then
-		local itemType, itemSubType = self:ItemClass(name, GetAuctionItemLink("list", index))
-		if itemType then
-			local rule = self.catMatch[itemType]
-			if not rule then return end
-			if rule ~= true and not rule[itemSubType] then return end
-		else
-			-- item not in the client cache, so we cannot say what it is;
-			-- keeping it beats silently dropping a real find
-			self.unclassified = (self.unclassified or 0) + 1
-		end
-	end
+	--[[
+		Cheapest test first, dearest last. Every filter below is arithmetic on
+		numbers already in hand, and between them they throw away the great bulk
+		of the auction house - so they run before the two tests that cost a call
+		into the client: the time-left bracket, and the category lookup that has
+		to build an item link and ask what the item is.
 
+		Ratio leads because it is both free and the most selective thing here.
+	]]
 	local cfg = self.db
+
+	local ratio = buyoutPrice / bid
+	if ratio < cfg.minRatio then return end
+
 	if cfg.onlyNoBids and bidAmount > 0 then return end
 	if cfg.hideOwn then
 		if highBidder then return end
@@ -756,16 +901,54 @@ function BS:Evaluate(index)
 	local timeLeft = GetAuctionItemTimeLeft("list", index) or 4
 	if cfg.endingSoon and timeLeft > 2 then return end
 
-	local ratio = buyoutPrice / bid
-	if ratio < cfg.minRatio then return end
+	-- category filtering for a GetAll, which the server hands over unfiltered
+	if self.catMatch then
+		local itemType, itemSubType = self:ItemClass(name, index)
+		if itemType then
+			local rule = self.catMatch[itemType]
+			if not rule then return end
+			if rule ~= true and not rule[itemSubType] then return end
+		else
+			-- item not in the client cache, so we cannot say what it is;
+			-- keeping it beats silently dropping a real find
+			self.unclassified = (self.unclassified or 0) + 1
+		end
+	end
+
+	--[[
+		Several identical auctions at once is the ordinary case, not the odd one:
+		a seller listing eight of the same bag makes eight rows this API cannot
+		tell apart. 3.3.5a exposes no auction id on the browse list, so two rows
+		carrying the same item, stack size, price, seller and time bracket are
+		the same thing as far as anything here can see.
+
+		Listing them separately misled in both directions. Eight rows looked like
+		eight finds when it was one deal at one price, and bidding a row placed a
+		bid on whichever copy the server handed back first - so pressing the same
+		row twice bid on two different auctions, which reads as a bug and is the
+		single most confusing thing this addon used to do.
+
+		One row per deal, carrying how many are up, is what is actually there.
+	]]
+	-- the one item link this row pays for, and only because it is a keeper
+	local link = GetAuctionItemLink("list", index)
+	local key  = format("%s:%d:%d:%d:%d:%s", tostring(link or name), count, bid,
+	                    buyoutPrice, timeLeft, tostring(owner or "?"))
+
+	local group = self.resultKeys and self.resultKeys[key]
+	if group then
+		group.copies = (group.copies or 1) + 1
+		group.seen   = time()
+		return
+	end
 
 	if #self.results >= MAX_RESULTS_HARD then
 		self.truncated = true
 		return
 	end
 
-	self.results[#self.results + 1] = {
-		link     = GetAuctionItemLink("list", index),
+	local r = {
+		link     = link,
 		name     = name,
 		texture  = texture,
 		count    = count,
@@ -778,7 +961,12 @@ function BS:Evaluate(index)
 		owner    = owner,
 		hasBid   = bidAmount > 0,
 		seen     = time(),
+		copies   = 1,
+		groupKey = key,
 	}
+	self.results[#self.results + 1] = r
+	self.resultKeys = self.resultKeys or {}
+	self.resultKeys[key] = r
 end
 
 -- Cheap fingerprint of the loaded page. Auctions being posted and bought
@@ -884,6 +1072,37 @@ ev:SetScript("OnUpdate", function(self, elapsed)
 	-- a tick-box drag ends wherever the button is let go, not just over a row
 	if BS.dragging and not IsMouseButtonDown("LeftButton") then
 		BS.dragging = nil
+	end
+
+	-- the inbox has stopped changing: work out what the mail says about bids
+	-- that ended while we were away
+	if BS.mailCheckAt and GetTime() >= BS.mailCheckAt then
+		BS.mailCheckAt = nil
+		BS:ResolveLedgerFromMail(false)
+	end
+
+	--[[
+		Asking the auction house whether a vanished bid is still up. This runs
+		off the same throttle as everything else, and only ever when no scan,
+		bid lookup or batch is using the auction list.
+	]]
+	if BS.ledgerQueryPending then
+		BS.ledgerThrottle = BS.ledgerThrottle + elapsed
+		if BS.ledgerThrottle > QUERY_TIMEOUT * 2 then
+			BS:StopLedgerSweep("Bid check gave up: the server would not take the lookup.")
+			return
+		end
+		if BS.ledgerThrottle >= 0.15 and CanSendAuctionQuery() then
+			BS.ledgerThrottle       = 0
+			BS.ledgerQueryPending   = false
+			BS:LedgerSweepQuery()
+		end
+		return
+	elseif BS.ledgerAwaiting then
+		if GetTime() - (BS.ledgerQueryTime or 0) > QUERY_TIMEOUT then
+			BS:StopLedgerSweep("Bid check timed out.")
+		end
+		return
 	end
 
 	-- looking up a single auction so we can bid on it
@@ -1048,8 +1267,10 @@ function BS:BidOn(result, auto)
 		return
 	end
 
-	-- cheapest bid first, so the auction we scanned lands on the first page
-	self:ApplyBidSort()
+	-- cheapest bid first, so the auction we scanned lands on the first page -
+	-- and so a lookup for one that is gone can give up instead of reading the
+	-- whole item out to the dearest listing on the house
+	self.bidSorted = self:ApplyBidSort()
 
 	self.bidSearch       = { result = result, page = 0, auto = auto }
 	self.bidQueryPending = true
@@ -1078,10 +1299,45 @@ local function SameAuction(index, r)
 	return true
 end
 
+--[[
+	Write down how many of this deal are really up.
+
+	A scan undercounts runs of identical auctions - a paged scan walks a live
+	server-side list by index, and auctions sharing a bid are tied with no stable
+	order between one page request and the next, so a page boundary landing
+	inside a run steps over part of it. Eight bags going in and four coming out
+	is exactly that, and nothing on our side of the connection fixes it.
+
+	The lookup a bid does anyway fixes it for free. Searching one item name does
+	not page through the whole house, so the run comes back together, and the
+	page is already loaded and already being walked to find the auction to bid
+	on. Counting the rest of it costs nothing.
+
+	`seen` is what is still biddable at the row's price, so bids already placed
+	are missing from it - hence adding them back. Never counting down from a
+	page we have not read is what keeps a half-read lookup from wrongly closing
+	a row; nothing left at all is the one case that shrinks it.
+]]
+function BS:NoteCopies(r, seen)
+	local before = r.copies or 1
+	local now    = (seen > 0) and math.max(before, (r.bidsDone or 0) + seen)
+	                          or (r.bidsDone or 0)
+
+	-- only a batch has a total that was approved before the extras turned up,
+	-- so only a batch has anything to report about them
+	if now > before and self.batch then
+		self.batchExtra = (self.batchExtra or 0) + (now - before)
+	end
+
+	r.copies  = now
+	r.counted = true
+end
+
 -- step 2: results came back - find our auction again
 function BS:LocatePendingBid()
 	local search = self.bidSearch
 	if not search then return end
+
 	local r = search.result
 
 	local numBatch, total = GetNumAuctionItems("list")
@@ -1094,30 +1350,62 @@ function BS:LocatePendingBid()
 		-- our own earlier bid on this page has not been reflected back yet,
 		-- so never offer the same row twice from one set of results
 		if not used[i] and SameAuction(i, r) then
-			local _, _, _, _, _, _, minBid, minIncrement, buyout, bidAmount =
+			local _, _, _, _, _, _, minBid, minIncrement, buyout, bidAmount, highBidder =
 				GetAuctionItemInfo("list", i)
 			local bid = (bidAmount and bidAmount > 0) and (bidAmount + minIncrement) or minBid
-			if bid and bid > 0 and bid < buyout and (not bestBid or bid < bestBid) then
-				best, bestBid = i, bid
+			-- an auction we are already winning is never one to bid on again:
+			-- with several copies up, that is the one way a row could have bid
+			-- us up against ourselves
+			if not highBidder and bid and bid > 0 and bid < buyout then
+				-- free, in the loop that was walking the page regardless
+				if bid <= r.bid then search.seen = (search.seen or 0) + 1 end
+				if not bestBid or bid < bestBid then best, bestBid = i, bid end
 			end
 		end
 	end
 
 	if best then
 		local auto = search.auto
+		self:NoteCopies(r, search.seen or 0)
 		self:CancelBidSearch()
 		self:OfferBid(best, bestBid, r, auto)
 		return
 	end
 
-	-- common item names span several pages, keep looking
+	--[[
+		Common item names span several pages, so keep looking - but not for ever,
+		and not past the point where the answer is already known.
+
+		The list is sorted cheapest current bid first. Our auction's bid is below
+		its own buyout, always: an auction dearer to bid on than to buy is not one
+		this addon would offer, and LocatePendingBid drops it above. So the moment
+		the dearest row on a page costs more to bid on than our auction's whole
+		buyout, no later page can be holding it.
+
+		That is the difference between "gone" answering at once and paging out
+		through every Abyss Crystal on the house at 800g to decide that a 70g one
+		is not there.
+	]]
+	local pastIt = false
+	if self.bidSorted and numBatch > 0 and (r.buyout or 0) > 0 then
+		local _, _, _, _, _, _, minBid, _, _, bidAmount =
+			GetAuctionItemInfo("list", numBatch)
+		local pageBid = (bidAmount and bidAmount > 0) and bidAmount or (minBid or 0)
+		pastIt = pageBid > r.buyout
+	end
+
 	local nextPage = search.page + 1
-	if nextPage * ITEMS_PER_PAGE < total and nextPage < BID_SEARCH_MAX_PAGES then
+	if not pastIt and nextPage * ITEMS_PER_PAGE < total
+	   and nextPage < BID_SEARCH_MAX_PAGES then
 		search.page          = nextPage
 		self.bidQueryPending = true
 		self:SetStatus(format("Looking up %s (page %d)...", r.name, nextPage + 1))
 		return
 	end
+
+	-- nothing of this deal is biddable any more, so what we bid on is all there
+	-- was: the row settles at that and stops offering more
+	self:NoteCopies(r, 0)
 
 	local inBatch = self.batch ~= nil
 	self:CancelBidSearch("Auction no longer available.")
@@ -1237,20 +1525,86 @@ function BS:FireArmedBid()
 	end
 end
 
+-- Is the auction sitting at `index` right now the one this bid was armed for?
+local function RowIs(listType, index, data)
+	if not index then return false end
+	local name, _, count, _, _, _, _, _, buyout, _, highBidder =
+		GetAuctionItemInfo(listType, index)
+	if name ~= data.name or count ~= data.count or buyout ~= data.buyout then
+		return false
+	end
+	-- an auction we are already winning is never one to re-bid
+	if listType == "bidder" and highBidder then return false end
+	if not data.link then return true end
+	local link = GetAuctionItemLink(listType, index)
+	return (not link) or link == data.link
+end
+
+--[[
+	Find the auction this bid was armed for, wherever it has got to.
+
+	Every bid the server accepts refreshes the bidder list, and that refresh
+	renumbers it: auctions we have just taken the lead on drop out of the
+	outbid set and everything below them shifts up. An index taken when the bid
+	was armed is therefore stale about half the time - which is exactly how
+	often a re-bid used to be cancelled "for safety", leaving every other
+	auction in the queue unbid.
+
+	What makes a bid safe is that it lands on the auction we meant at no more
+	than the price we quoted. Position is not part of that, so when the row has
+	moved, look the auction up again rather than refusing. Indices already bid
+	on stay off limits, so a shift can never put us on the same auction twice.
+]]
+function BS:RelocateBid(data)
+	local listType = data.listType or "list"
+	local used = (listType == "bidder") and (self.rebidUsed or {})
+	                                    or (self.usedIndices or {})
+	local n = GetNumAuctionItems(listType) or 0
+	for i = 1, n do
+		if not used[i] and RowIs(listType, i, data) then return i end
+	end
+	return nil
+end
+
 -- step 4: re-check the row right before spending, in case the list moved
 function BS:VerifyAndBid(data)
 	if not data or not self.atAH then return false end
 
 	local listType = data.listType or "list"
+
+	-- prefer where it was; find it again only if it is no longer there
+	local index = data.index
+	if not RowIs(listType, index, data) then
+		index = self:RelocateBid(data)
+		if not index then
+			self:Print("That auction is no longer on the list - bid cancelled. "
+				.. "It has been won, bought out or cancelled.")
+			self:SetStatus("Bid cancelled: the auction is gone.")
+			return false
+		end
+	end
+
 	local name, _, count, _, _, _, minBid, minIncrement, buyout, bidAmount =
-		GetAuctionItemInfo(listType, data.index)
-	local link = GetAuctionItemLink(listType, data.index)
+		GetAuctionItemInfo(listType, index)
+	local link = GetAuctionItemLink(listType, index)
 	local bid  = (bidAmount and bidAmount > 0) and (bidAmount + minIncrement) or minBid
 
-	if name ~= data.name or count ~= data.count or buyout ~= data.buyout
-	   or bid ~= data.bid or (data.link and link and link ~= data.link) then
-		self:Print("The auction list changed - bid cancelled for safety. Please try again.")
-		self:SetStatus("Bid cancelled: auction list changed.")
+	if not bid or bid <= 0 or (buyout > 0 and bid >= buyout) then
+		self:Print("That auction can no longer be bid on sensibly - skipped.")
+		self:SetStatus("Bid cancelled: nothing sensible left to bid.")
+		return false
+	end
+
+	--[[
+		The price is the guard that actually matters. The same or cheaper is
+		fine and needs no comment; dearer means somebody bid since this was
+		lined up, and quietly paying more than the figure on the button is
+		never something to do on your behalf.
+	]]
+	if bid > data.bid then
+		self:Print(format("Skipped %s: the bid rose from %s to %s since it was lined up.",
+			link or name, BS.Money(data.bid), BS.Money(bid)))
+		self:SetStatus("Bid cancelled: the price went up.")
 		return false
 	end
 
@@ -1265,22 +1619,49 @@ function BS:VerifyAndBid(data)
 	self.lastBidResult     = data.result
 	self.lastBidAmount     = bid
 	self.lastBidLink       = link or name
+
+	--[[
+		Written down before the call, from the row we just re-read rather than
+		from the scan, so the ledger holds what we actually bid on. minBid is
+		the seller's starting price and never moves, which is what lets this
+		entry still be recognised after somebody outbids us.
+	]]
+	if self:HasLedger() then
+		self.lastBidEntry = self:LedgerRecord({
+			link    = link,
+			name    = name,
+			texture = data.result and data.result.texture or nil,
+			count   = count,
+			quality = data.result and data.result.quality or nil,
+			owner   = data.result and data.result.owner or nil,
+			minBid  = minBid,
+			buyout  = buyout,
+			myBid   = bid,
+			timeLeft = data.result and data.result.timeLeft or nil,
+		})
+	end
 	self.bidQueryEarliest  = GetTime() + 1
 	self.usedIndices       = self.usedIndices or {}
-	self.usedIndices[data.index] = true
+	self.usedIndices[index] = true
 	if listType == "bidder" then
 		self.rebidUsed = self.rebidUsed or {}
-		self.rebidUsed[data.index] = true
+		self.rebidUsed[index] = true
 	end
 
-	PlaceAuctionBid(listType, data.index, bid)
+	PlaceAuctionBid(listType, index, bid)
 
 	-- Sent is not placed. The row is only marked once the server confirms via
 	-- AUCTION_BIDDER_LIST_UPDATE; until then it is pending, and a refusal or a
 	-- silence clears it again.
 	if data.result then
 		data.result.bidPending = true
-		data.result.selected   = false
+		-- a row stands for every identical auction at that price, so what marks
+		-- it finished is having bid on all of them, not on one
+		data.result.bidsDone   = (data.result.bidsDone or 0) + 1
+		-- and a deal with copies still to go stays ticked, so taking the rest is
+		-- one more press of Bid selected rather than finding and re-ticking it
+		data.result.selected =
+			((data.result.copies or 1) - data.result.bidsDone) > 0
 		self.bidSpent = (self.bidSpent or 0) + bid
 	end
 	self:Print("Sent bid " .. BS.Money(bid) .. " on " .. (link or name) .. ".")
@@ -1295,13 +1676,158 @@ function BS:BidRefused(reason)
 	if r then
 		r.bidPlaced  = nil
 		r.bidPending = nil
+		r.bidsDone   = math.max(0, (r.bidsDone or 1) - 1)
 		self.bidSpent = math.max(0, (self.bidSpent or 0) - (self.lastBidAmount or 0))
 	end
+	-- a bid the server threw away must not linger as an entry that later reads
+	-- as an auction which mysteriously vanished
+	if self:HasLedger() then self:LedgerDrop(self.lastBidEntry) end
+	self.lastBidEntry = nil
 	self.lastBidTime = nil
 	self:Print("|cffff4444Server refused that bid:|r " .. tostring(reason))
 	self:SetStatus("Bid refused: " .. tostring(reason))
 	self:UpdateUI()
 	if self.batch then self:EndBatch("Batch stopped: the server refused a bid.") end
+end
+
+--[[
+	Read one row of the Browse list and print it, bidding on nothing.
+
+	This exists to check the assumption the whole bid ledger rests on: that
+	minBid is the seller's starting price and stays put, while bidAmount is
+	what moves when somebody outbids you. Peek a row, have someone outbid it,
+	peek it again - bidAmount should have climbed and minBid should not have
+	budged, leaving the key unchanged.
+]]
+function BS:PeekAuction(index)
+	if not self.atAH then
+		self:Print("Open the auction house first.")
+		return
+	end
+
+	local n = GetNumAuctionItems("list") or 0
+	index = tonumber(index)
+	if not index or index < 1 or index > n then
+		self:Print(format("Usage: /snipe peek <1-%d>. Search something in the Browse "
+			.. "tab first; this reads whatever is on screen there.", n))
+		return
+	end
+
+	local name, _, count, _, _, _, minBid, minInc, buyout, bidAmount, highBidder, owner =
+		GetAuctionItemInfo("list", index)
+	local link = GetAuctionItemLink("list", index)
+
+	self:Print("item: " .. tostring(link or name))
+	self:Print(format("|cffffd700minBid=%s|r (fixed)   bidAmount=%s (moves)   "
+		.. "minIncrement=%s   buyout=%s",
+		tostring(minBid), tostring(bidAmount), tostring(minInc), tostring(buyout)))
+	self:Print(format("owner=%s  highBidder=%s  count=%s",
+		tostring(owner), tostring(highBidder), tostring(count)))
+	if self:HasLedger() then
+		self:Print("ledger key: |cff33ff99"
+			.. BS.BidKey(link, name, count, minBid, buyout) .. "|r")
+	end
+end
+
+--[[
+	Run the scan's own filter chain against one row of the Browse list and say,
+	test by test, what became of it.
+
+	"There are two of these on the auction house and only one was listed" is
+	usually one row standing for both - identical auctions are grouped, and the
+	row says how many are up. When they really are listed apart, it is nearly
+	always a filter doing its job on the one that got bid up. Ratio is
+	the buyout over what the auction would cost *you*, right now - so a single
+	bid by somebody else drops that auction's ratio while its identical twin
+	sits untouched at the top of the list. Hide mine does the same to whichever
+	one you are currently winning.
+
+	Both are working as intended, and both are invisible. This makes them say
+	so out loud instead.
+]]
+function BS:WhyFiltered(index)
+	if not self.atAH then
+		self:Print("Open the auction house first.")
+		return
+	end
+
+	local n = GetNumAuctionItems("list") or 0
+	index = tonumber(index)
+	if not index or index < 1 or index > n then
+		self:Print(format("Usage: /snipe why <1-%d>. Search something in the Browse "
+			.. "tab first; this reads whatever is on screen there.", n))
+		return
+	end
+
+	local name, _, count, quality, _, _, minBid, minIncrement,
+	      buyoutPrice, bidAmount, highBidder, owner = GetAuctionItemInfo("list", index)
+	local link = GetAuctionItemLink("list", index)
+
+	count, bidAmount = count or 1, bidAmount or 0
+	minIncrement, minBid = minIncrement or 0, minBid or 0
+
+	self:Print("item: " .. tostring(link or name))
+
+	if not name or not buyoutPrice or buyoutPrice <= 0 then
+		self:Print("|cffff4444dropped:|r no buyout, so there is no ratio to judge it by.")
+		return
+	end
+
+	local cfg = self.db
+	local bid = (bidAmount > 0) and (bidAmount + minIncrement) or minBid
+	local reasons = 0
+
+	local function verdict(ok, text)
+		if ok then
+			self:Print("   |cff00ff00pass|r  " .. text)
+		else
+			reasons = reasons + 1
+			self:Print("   |cffff4444DROP|r  " .. text)
+		end
+	end
+
+	self:Print(format("costs %s to bid now%s, buyout %s",
+		BS.Money(bid),
+		bidAmount > 0 and format(" (someone bid %s)", BS.Money(bidAmount)) or " (nobody has bid)",
+		BS.Money(buyoutPrice)))
+
+	verdict(bid > 0 and bid < buyoutPrice, "bid is below the buyout")
+
+	if cfg.onlyNoBids then
+		verdict(bidAmount == 0, "Only unbid: nobody has bid on it yet")
+	end
+	if cfg.hideOwn then
+		verdict(not highBidder, "Hide mine: you are not already the high bidder")
+		verdict(not (owner and cfg.knownChars and cfg.knownChars[owner]),
+			format("Hide mine: seller (%s) is not one of your characters", tostring(owner)))
+	end
+	verdict(not quality or quality >= cfg.minQuality,
+		format("Min quality: %s vs %s", tostring(quality), tostring(cfg.minQuality)))
+	verdict(buyoutPrice >= cfg.minBuyout,
+		format("Min buyout: %s vs %s", BS.Money(buyoutPrice), BS.Money(cfg.minBuyout)))
+	verdict(not (cfg.maxBid > 0 and bid > cfg.maxBid),
+		format("Max bid: %s vs %s", BS.Money(bid), BS.Money(cfg.maxBid)))
+
+	local timeLeft = GetAuctionItemTimeLeft("list", index) or 4
+	if cfg.endingSoon then
+		verdict(timeLeft <= 2, "Ending < 2h: time left bracket " .. tostring(timeLeft))
+	end
+
+	local ratio = buyoutPrice / bid
+	verdict(ratio >= cfg.minRatio,
+		format("Min ratio: %.1fx vs %sx", ratio, tostring(cfg.minRatio)))
+
+	if reasons == 0 then
+		self:Print("|cff00ff00A scan would keep this one.|r If you cannot see it on the "
+			.. "list, look for a row with the same price carrying a |cffffd100(n up)|r "
+			.. "count: identical auctions share one row. Otherwise the scan never read "
+			.. "it - a paged scan stops at your max bid, and categories narrow it "
+			.. "further. Bidding on the row corrects its count either way - the "
+			.. "lookup a bid does anyway sees every copy.")
+	else
+		self:Print(format("|cffff8800Dropped by %d filter%s above.|r",
+			reasons, reasons == 1 and "" or "s"))
+	end
 end
 
 -- Bid on one auction of whatever the auction house currently has loaded,
@@ -1413,6 +1939,7 @@ function BS:ApplyBidSync()
 			kept = kept + 1
 		elseif r.bidPlaced then
 			r.bidPlaced = nil
+			r.bidsDone  = 0		-- nothing of this deal was actually bid on
 			released = released + 1
 		end
 	end
@@ -1428,7 +1955,7 @@ function BS:ClearMarks()
 	local n = 0
 	for _, r in ipairs(self.results) do
 		if r.bidPlaced or r.bidPending then n = n + 1 end
-		r.bidPlaced, r.bidPending = nil, nil
+		r.bidPlaced, r.bidPending, r.bidsDone = nil, nil, 0
 	end
 	self:Print(format("Cleared %d 'already bid' mark%s.", n, n == 1 and "" or "s"))
 	self:UpdateUI()
@@ -1439,24 +1966,65 @@ end
 --=============================================================================
 
 -- ticked rows (whatever their state), and how many Select all would tick
+--[[
+	May a bulk action tick this row?
+
+	Bulk means Select all, a shift-click range, or dragging across the boxes -
+	anything that ticks rows you have not looked at one by one. Those obey Min
+	profit; a single deliberate click does not, because a filter must never put
+	a row you can see and want out of reach.
+
+	An unknown profit does not clear the bar. Everywhere else in this addon an
+	unpriced item gets the benefit of the doubt and is kept, on the grounds
+	that it is the case you most need to see - but this is the moment gold
+	actually gets spent, and "we have no idea what this is worth" is not a
+	reason to bulk-tick it.
+]]
+-- "already bid on" only closes a row once every copy of the deal has had a bid;
+-- one bid out of eight leaves seven worth ticking. A count that came back empty
+-- closes it too - somebody else took them while we were looking.
+function BS:Finished(r)
+	if r.counted and self:CopiesLeft(r) <= 0 then return true end
+	return r.bidPlaced and (r.bidsDone or 0) >= (r.copies or 1)
+end
+
+function BS:BulkSelectable(r)
+	if self:Finished(r) or BS.Expired(r) then return false end
+
+	local least = self.db.minProfit or 0
+	if least > 0 then
+		-- cheap after the first pass, and skipped entirely at the default of 0
+		self:FillValue(r)
+		if not r.profit or r.profit < least then return false end
+	end
+	return true
+end
+
+-- rows, tickable rows, gold, and the auctions those rows actually stand for
 function BS:CountSelected()
-	local selected, selectable, total = 0, 0, 0
+	local selected, selectable, total, auctions = 0, 0, 0, 0
 	for _, r in ipairs(self.results) do
-		if not r.bidPlaced and not BS.Expired(r) then selectable = selectable + 1 end
+		if self:BulkSelectable(r) then selectable = selectable + 1 end
 		if r.selected then
+			local n = self:CopiesLeft(r)
 			selected = selected + 1
-			total = total + r.bid
+			auctions = auctions + n
+			total = total + r.bid * n
 		end
 	end
-	return selected, selectable, total
+	return selected, selectable, total, auctions
 end
 
 -- Ticking obeys the same rule as Select all: never bulk-tick something already
 -- bid on or certainly ended, but always allow unticking anything.
-function BS:ApplySelect(r, state)
+function BS:ApplySelect(r, state, bulk)
 	if not r then return end
 	if state then
-		if r.bidPlaced or BS.Expired(r) then return end
+		if bulk then
+			if not self:BulkSelectable(r) then return end
+		elseif self:Finished(r) or BS.Expired(r) then
+			return
+		end
 		r.selected = true
 	else
 		r.selected = false
@@ -1471,7 +2039,7 @@ function BS:SelectRange(from, to, state)
 		local r = self.results[i]
 		if r then
 			local before = r.selected
-			self:ApplySelect(r, state)
+			self:ApplySelect(r, state, true)
 			if before ~= r.selected then changed = changed + 1 end
 		end
 	end
@@ -1485,15 +2053,26 @@ end
 function BS:ToggleSelectAll()
 	local selected, selectable = self:CountSelected()
 	local want = (selected < selectable)
+	local skipped = 0
 	for _, r in ipairs(self.results) do
 		if want then
-			-- never bulk-tick something already bid on or certainly ended
-			if not r.bidPlaced and not BS.Expired(r) then r.selected = true end
+			if self:BulkSelectable(r) then
+				r.selected = true
+			elseif not self:Finished(r) and not BS.Expired(r) then
+				-- passed over only because of Min profit, so say so
+				skipped = skipped + 1
+			end
 		else
 			r.selected = false
 		end
 	end
 	self:UpdateUI()
+
+	if want and skipped > 0 then
+		self:Print(format("Left %d row%s unticked: below your minimum profit of %s. "
+			.. "Tick any of them by hand if you want it anyway.",
+			skipped, skipped == 1 and "" or "s", BS.Money(self.db.minProfit)))
+	end
 end
 
 --=============================================================================
@@ -1671,25 +2250,45 @@ function BS:StartBatchBid()
 		return
 	end
 
-	local list, total = {}, 0
+	--[[
+		One queue entry per auction, not per row: a row stands for every
+		identical auction at its price, and ticking it means all of them.
+
+		The number used is the best one held right now - the scan's count until
+		a lookup has corrected it, and lookups do that for free as the batch
+		runs. So a first pass may find more copies than it was approved for; it
+		bids what you approved, says how many more turned up, and leaves the row
+		carrying the true count so a second press takes the rest at a price you
+		approve again. Nothing is ever bid beyond the box you said yes to.
+	]]
+	local queue, total, deals = {}, 0, 0
 	for _, r in ipairs(self.results) do
 		if r.selected then
-			list[#list + 1] = r
-			total = total + r.bid
+			deals = deals + 1
+			for _ = 1, self:CopiesLeft(r) do
+				queue[#queue + 1] = r
+				total = total + r.bid
+			end
 		end
 	end
 
-	if #list == 0 then
+	if deals == 0 then
 		self:Print("Nothing selected - tick the boxes on the rows you want, or press Select all.")
 		return
 	end
+	if #queue == 0 then
+		self:SetStatus("None of those are still up.")
+		self:Print("None of the ticked deals are still biddable at the price they showed.")
+		return
+	end
+
 	if GetMoney() < total then
 		self:Print("Careful: the whole list costs " .. BS.Money(total)
 			.. " and you have " .. BS.Money(GetMoney()) .. ". It will stop when you run out.")
 	end
 
-	local dialog = StaticPopup_Show("BIDSNIPER_CONFIRM_BATCH", BS.Comma(#list), BS.Money(total))
-	if dialog then dialog.data = { list = list, total = total } end
+	local dialog = StaticPopup_Show("BIDSNIPER_CONFIRM_BATCH", BS.Comma(#queue), BS.Money(total))
+	if dialog then dialog.data = { list = queue, total = total } end
 end
 
 function BS:RunBatch(data)
@@ -1710,6 +2309,7 @@ function BS:RunBatch(data)
 	self.batchSkipped = 0
 	self.batchBudget  = data.total
 	self.bidSpent   = 0
+	self.batchExtra = 0		-- copies the lookups turn up that the scan missed
 	self:UpdateUI()
 	self:BatchNext()
 end
@@ -1765,14 +2365,31 @@ function BS:BatchStep(outcome)
 end
 
 function BS:EndBatch(reason)
+	local extra = self.batchExtra or 0
+
 	self.batch = nil
 	self.armed = nil
+	self.batchExtra = 0
 	self.rebidUsed = {}
 	self:CancelBidSearch()
 	if reason then
 		self:SetStatus(reason)
 		self:Print(reason)
 	end
+
+	--[[
+		Copies the lookups turned up that the scan had stepped over. They were
+		not in the total you approved, so they were not bid on - but the rows now
+		carry the true count, and pressing Bid selected again asks for them at a
+		figure you approve on its own.
+	]]
+	if extra > 0 then
+		self:Print(format("|cffffd100%d more identical auction%s up|r than the scan "
+			.. "found - too late to add to a total you had already approved. The rows "
+			.. "now say how many; press |cffffffffBid selected|r again to take them.",
+			extra, extra == 1 and " was" or "s were"))
+	end
+
 	self:UpdateUI()
 end
 
@@ -1831,6 +2448,7 @@ ev:RegisterEvent("AUCTION_HOUSE_CLOSED")
 ev:RegisterEvent("AUCTION_ITEM_LIST_UPDATE")
 ev:RegisterEvent("AUCTION_BIDDER_LIST_UPDATE")
 ev:RegisterEvent("UI_ERROR_MESSAGE")
+ev:RegisterEvent("MAIL_INBOX_UPDATE")
 
 ev:SetScript("OnEvent", function(self, event, arg1)
 	if event == "ADDON_LOADED" then
@@ -1854,6 +2472,7 @@ ev:SetScript("OnEvent", function(self, event, arg1)
 		BidSniperDB.wishlist   = BidSniperDB.wishlist   or {}
 		BidSniperDB.priceCache = BidSniperDB.priceCache or {}
 		BidSniperDB.knownChars = BidSniperDB.knownChars or {}
+		BidSniperDB.bidLog     = BidSniperDB.bidLog     or {}
 		BidSniperDB.categories  = BidSniperDB.categories  or {}
 		BidSniperDB.subcats     = BidSniperDB.subcats     or {}
 		BidSniperDB.catExpanded = BidSniperDB.catExpanded or {}
@@ -1889,6 +2508,10 @@ ev:SetScript("OnEvent", function(self, event, arg1)
 				dropped, dropped == 1 and "" or "s"))
 		end
 
+		-- index what survived, so a resumed scan adds to those rows rather than
+		-- starting a second row for a deal already on the list
+		BS:SetResults(BS.results)
+
 		BS:PrunePriceCache()
 
 		BS:BuildUI()
@@ -1910,16 +2533,26 @@ ev:SetScript("OnEvent", function(self, event, arg1)
 	elseif event == "PLAYER_LOGIN" then
 		local me = UnitName("player")
 		if me and BS.db then BS.db.knownChars[me] = true end
+		-- say it once, at login, rather than letting it surface as an error
+		-- the first time a bid is placed
+		if not BS:HasLedger() then BS:NoLedger() end
 
 	elseif event == "AUCTION_HOUSE_SHOW" then
 		BS.atAH = true
 		if BS.db.autoShow and BS.frame then BS.frame:Show() end
+		-- the first thing worth knowing on arriving is what happened to the
+		-- bids you left running
+		if BS.db.autoCheckBids and BS:HasLedger() and #BS:LedgerOpen() > 0 then
+			BS:CheckBids(true)
+		end
 
 	elseif event == "AUCTION_HOUSE_CLOSED" then
 		BS.atAH = false
 		if BS.scanning then BS:StopScan("Scan stopped: auction house closed.") end
 		if BS.batch then BS:EndBatch("Batch stopped: auction house closed.") end
 		BS:CancelBidSearch()
+		if BS:HasLedger() then BS:StopLedgerSweep() end
+		BS.wantLedger      = false
 		-- an armed bid points at a list that no longer exists
 		BS.armed           = nil
 		BS.loadedQueryName = nil
@@ -1934,10 +2567,19 @@ ev:SetScript("OnEvent", function(self, event, arg1)
 			BS:BidRefused(arg1)
 		end
 
+	elseif event == "MAIL_INBOX_UPDATE" then
+		-- this fires repeatedly while the inbox fills in, so settle up once the
+		-- flood stops rather than on every one of them
+		if BS.db and BS:HasLedger() and #BS:LedgerOpen() > 0 then
+			BS.mailCheckAt = GetTime() + 0.5
+		end
+
 	elseif event == "AUCTION_BIDDER_LIST_UPDATE" then
 		if BS.lastBidTime and (GetTime() - BS.lastBidTime) < 3 then
 			BS:Print("|cff00ff00Server accepted the bid.|r")
 			BS.lastBidTime = nil
+			if BS:HasLedger() then BS:LedgerConfirm(BS.lastBidEntry) end
+			BS.lastBidEntry = nil
 			local r = BS.lastBidResult
 			if r then
 				r.bidPending = nil
@@ -1965,7 +2607,17 @@ ev:SetScript("OnEvent", function(self, event, arg1)
 			BS:PrintMyBids()
 		end
 
+		if BS.wantLedger then
+			local quiet = BS.ledgerQuiet
+			BS.wantLedger, BS.ledgerQuiet = false, nil
+			BS:ReconcileLedger(quiet)
+		end
+
 	elseif event == "AUCTION_ITEM_LIST_UPDATE" then
+		if BS.ledgerSweep and BS.ledgerAwaiting then
+			BS:LedgerSweepResults()
+			return
+		end
 		if BS.bidSearch and BS.bidAwaiting then
 			BS.bidAwaiting = false
 			-- results are really here now, so the list genuinely holds this
@@ -2058,6 +2710,9 @@ function BS:DumpScanInfo()
 	if self.db.scanMethod == "paged" then
 		blockers[#blockers + 1] = "scan method is forced to paged"
 	end
+	if self.db.scanMethod == "thorough" then
+		blockers[#blockers + 1] = "scan method is thorough, which never uses GetAll"
+	end
 	if not canQueryAll then
 		blockers[#blockers + 1] = "the client will not allow GetAll yet (15 minute cooldown)"
 	end
@@ -2067,6 +2722,10 @@ function BS:DumpScanInfo()
 	else
 		self:Print("|cffff8800Next scan will page through instead, because:|r")
 		for _, why in ipairs(blockers) do self:Print("   - " .. why) end
+		if self.db.scanMethod ~= "thorough" then
+			self:Print("A sorted paged scan can step over auctions where several share "
+				.. "a bid. |cffffffff/snipe thorough|r reads every page instead.")
+		end
 	end
 end
 
@@ -2087,6 +2746,12 @@ SlashCmdList["BIDSNIPER"] = function(msg)
 	elseif cmd == "trysel" then
 		BS:TryBid(rest, true)
 		return
+	elseif cmd == "peek" then
+		BS:PeekAuction(rest)
+		return
+	elseif cmd == "why" then
+		BS:WhyFiltered(rest)
+		return
 	end
 
 	if msg == "scan" or msg == "newscan" then
@@ -2101,11 +2766,30 @@ SlashCmdList["BIDSNIPER"] = function(msg)
 	elseif msg == "getall" then
 		BS.db.scanMethod = "getall"
 		BS:Print("Scan method: GetAll (fast, needs server support, 15 min cooldown).")
+	elseif msg == "thorough" then
+		BS.db.scanMethod = "thorough"
+		BS:Print("Scan method: thorough (every page, unsorted, nothing stepped over).")
+		BS:Print("Slower than the others, and the one to use when auctions go missing.")
 	elseif msg == "auto" then
 		BS.db.scanMethod = "auto"
 		BS:Print("Scan method: auto (GetAll when available, otherwise paged).")
 	elseif msg == "bids" then
 		BS:ShowMyBids()
+	elseif msg == "mybids" or msg == "checkbids" or msg == "listbids"
+	       or msg == "mail" or msg == "findbids" then
+		if not BS:HasLedger() then
+			BS:NoLedger()
+		elseif msg == "mybids" then
+			BS:ShowLedger()
+		elseif msg == "checkbids" then
+			BS:CheckBids(false)
+		elseif msg == "listbids" then
+			BS:PrintLedger()
+		elseif msg == "findbids" then
+			BS:StartLedgerSweep(false)
+		else
+			BS:ResolveLedgerFromMail(false)
+		end
 	elseif msg == "syncbids" then
 		BS:SyncBids()
 	elseif msg == "clearmarks" then
@@ -2123,11 +2807,19 @@ SlashCmdList["BIDSNIPER"] = function(msg)
 		BS:Print("/snipe - toggle the window")
 		BS:Print("/snipe scan - start a complete new scan")
 		BS:Print("/snipe resume - carry on from where a scan was interrupted")
-		BS:Print("/snipe auto | paged | getall - choose the scan method")
+		BS:Print("/snipe auto | paged | getall | thorough - choose the scan method")
+		BS:Print("/snipe thorough - slowest, but never steps over an auction")
+		BS:Print("/snipe mybids - open the record of every bid you have placed")
+		BS:Print("/snipe checkbids - fast check: your Bids tab and your mail")
+		BS:Print("/snipe findbids - slow check: search the auction house itself")
+		BS:Print("/snipe listbids - print that record to chat")
+		BS:Print("/snipe mail - settle ended bids from the mail (at a mailbox)")
 		BS:Print("/snipe bids - ask the server what you have actually bid on")
 		BS:Print("/snipe syncbids - fix the 'already bid' marks from the server's list")
 		BS:Print("/snipe clearmarks - drop every 'already bid' mark")
 		BS:Print("/snipe prices - forget cached prices and rebuild the Profit column")
+		BS:Print("/snipe why <n> - say which filter dropped row n of the Browse list")
+		BS:Print("/snipe peek <n> - read row n of the Browse list, bidding on nothing")
 		BS:Print("/snipe try <n> - test-bid row n of the Browse list, showing everything")
 		BS:Print("/snipe trysel <n> - same, but select the row first")
 		BS:Print("/snipe debug - scan method, saved results, GetAll availability")
