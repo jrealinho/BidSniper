@@ -30,6 +30,10 @@ BS.defaults = {
 	subcats     = {},		-- class index -> set of subclass indices
 	catExpanded = {},		-- which classes are opened out in the panel
 	wishlist    = {},		-- item names to check on a wishlist scan
+	recipes     = {},		-- flask/elixir recipes read from your tradeskill window
+	craftPrices = {},		-- item name -> { unit, qty, t } harvested by a scan
+	craftWant   = {},		-- recipe name -> how many you plan to make
+	piggyback   = true,		-- read another addon's full scan as if it were ours
 	priceCache  = {},		-- item name -> { v = unit price, t = when }
 	knownChars  = {},		-- every character of yours that has logged in
 	bidLog      = {},		-- every bid placed, and what became of it
@@ -641,6 +645,9 @@ function BS:StartScan(resume, mode)
 	-- past, which costs nothing and is the quickest way to settle a bid
 	if self:HasLedger() then self:BuildLedgerWatch() end
 
+	-- and against the reagents your recipes need, on the same free terms
+	if self.BuildCraftWatch then self:BuildCraftWatch() end
+
 	-- Decide the method before building the queries: a GetAll is a single
 	-- request whatever the filters say, and the categories get applied to the
 	-- results instead.
@@ -774,6 +781,10 @@ function BS:StopScan(reason)
 	-- so it keeps what it found and closes nothing
 	if self:HasLedger() then self:LedgerScanFinished(false) end
 
+	-- prices are different: a row it did read is a row it really saw, and half
+	-- a sweep of reagent prices still beats none
+	if self.CraftScanFinished then self:CraftScanFinished() end
+
 	self:SaveResume()
 	local res, nextPage, pages = self:ResumeInfo()
 
@@ -788,10 +799,13 @@ function BS:StopScan(reason)
 end
 
 function BS:FinishScan()
+	local shared = self.piggybacking
+
 	self.scanning     = false
 	self.queryPending = false
 	self.awaitingResults = false
 	self.processing   = false
+	self.piggybacking = nil
 
 	self:SortResults()
 
@@ -810,13 +824,22 @@ function BS:FinishScan()
 			and (self.useGetAll or #self:ActiveClasses() == 0))
 	end
 
+	-- reagent prices this sweep picked up on its way through
+	local priced = self.CraftScanFinished and self:CraftScanFinished() or 0
+	if priced and priced > 0 then
+		self:Print(format("Priced |cffffffff%d|r crafting item%s from that scan "
+			.. "(no extra queries) - the Craft tab is up to date.",
+			priced, priced == 1 and "" or "s"))
+	end
+
 	-- identical auctions share a row, so the row count and the number of
 	-- auctions behind it are different figures and both are worth saying
 	local copies = 0
 	for _, r in ipairs(self.results) do copies = copies + (r.copies or 1) end
 
 	local secs = GetTime() - (self.scanStart or GetTime())
-	self:SetStatus(format("%d match%s%s in %s auctions  (%.0fs)%s%s",
+	self:SetStatus(format("%s%d match%s%s in %s auctions  (%.0fs)%s%s",
+		shared and "|cff00ff00[shared scan]|r  " or "",
 		#self.results,
 		#self.results == 1 and "" or "es",
 		copies > #self.results and format(" (%d auctions)", copies) or "",
@@ -864,6 +887,17 @@ function BS:Evaluate(index)
 		self:LedgerSawAuction(
 			BS.BidKey(GetAuctionItemLink("list", index), name, count, minBid, buyoutPrice),
 			minBid, bidAmount, minIncrement, highBidder)
+	end
+
+	--[[
+		And the reagent prices the crafting tab runs on, from the same row, on
+		the same terms: one hash lookup against a set built before the scan
+		started, and no work at all for a name that is not in it. Ahead of the
+		filters because reagents are cheap bulk goods - min buyout and min ratio
+		would throw away every one of them.
+	]]
+	if self.craftWatchNames and self.craftWatchNames[name] then
+		self:CraftSawAuction(name, count, buyoutPrice)
 	end
 
 	-- no buyout, no ratio: nothing here can judge whether it is a bargain
@@ -969,6 +1003,71 @@ function BS:Evaluate(index)
 	self.resultKeys[key] = r
 end
 
+--[[
+	Someone else's full scan, read as if it were ours.
+
+	GetAll is one request for the entire auction house and the client allows it
+	roughly once every fifteen minutes - and that cooldown is shared by every
+	addon on it. So running Auctionator's full scan and then BidSniper's meant
+	waiting a quarter of an hour between two sweeps of exactly the same data.
+
+	It does not have to be that way. The dump lands in the auction list that all
+	addons read, so when one arrives that we did not ask for, we can walk it too.
+	Press Auctionator's full scan and this fills in beside it: same request, same
+	data, both sets of answers, one cooldown.
+
+	The tell is the size. A page query answers with fifty rows at most; anything
+	larger than a page is a dump, and nothing else produces one.
+]]
+function BS:MaybePiggyback()
+	if not self.db.piggyback or not self.atAH then return end
+	if self.scanning or self.processing or self.batch
+	   or self.bidSearch or self.ledgerSweep then return end
+
+	local numBatch, total = GetNumAuctionItems("list")
+	if not numBatch or numBatch <= ITEMS_PER_PAGE then return end
+
+	-- the same dump arriving twice is one scan, not two
+	if self.piggybackCount == numBatch
+	   and (GetTime() - (self.piggybackAt or 0)) < 60 then return end
+
+	self.piggybackAt    = GetTime()
+	self.piggybackCount = numBatch
+
+	self:Print(format("|cff00ff00Reading another addon's full scan|r - %s auctions, "
+		.. "no second request and no second cooldown.", BS.Comma(numBatch)))
+
+	-- everything a GetAll of our own would have set up, minus the request
+	self.scanMode     = "normal"
+	self.useGetAll    = true
+	self.piggybacking = true
+	self.catMatch     = self:BuildCategoryMatcher()
+	self.classCache   = {}
+	self.unclassified = 0
+	self.queries      = { { name = "", label = "everything" } }
+	self.queryIndex   = 1
+	self.page         = 0
+	self.totalPages   = nil
+	self.truncated    = false
+	self.stoppedEarly = false
+	self.scannedCount = 0
+	self.scanStart    = GetTime()
+	self.db.resume    = nil
+
+	if self:HasLedger() then self:BuildLedgerWatch() end
+	if self.BuildCraftWatch then self:BuildCraftWatch() end
+
+	self:SetResults({})
+
+	self.batchCount = numBatch
+	self.totalAuctions = total or numBatch
+	self.readIndex  = 1
+	self.processing = true		-- OnUpdate takes it from here, a slice at a time
+	self:SetStatus(format("Reading a shared full scan: %s auctions...",
+		BS.Comma(numBatch)))
+	self:UpdateUI()
+end
+
 -- Cheap fingerprint of the loaded page. Auctions being posted and bought
 -- while we page through can make the server hand back a page we have already
 -- read; re-asking is better than counting it twice.
@@ -1007,7 +1106,13 @@ end
 
 -- read the current batch a slice at a time so the client doesn't freeze
 function BS:ProcessChunk()
-	local chunk = self.useGetAll and 1000 or ITEMS_PER_PAGE
+	--[[
+		A smaller bite while sharing someone else's scan. Auctionator is walking
+		the same forty thousand rows in the same frames, and two addons each
+		taking a thousand a frame is how a full scan turns into a slideshow.
+	]]
+	local chunk = self.piggybacking and 300
+	              or (self.useGetAll and 1000 or ITEMS_PER_PAGE)
 	local last  = math.min(self.readIndex + chunk - 1, self.batchCount)
 
 	for i = self.readIndex, last do
@@ -2449,6 +2554,8 @@ ev:RegisterEvent("AUCTION_ITEM_LIST_UPDATE")
 ev:RegisterEvent("AUCTION_BIDDER_LIST_UPDATE")
 ev:RegisterEvent("UI_ERROR_MESSAGE")
 ev:RegisterEvent("MAIL_INBOX_UPDATE")
+ev:RegisterEvent("TRADE_SKILL_SHOW")
+ev:RegisterEvent("TRADE_SKILL_UPDATE")
 
 ev:SetScript("OnEvent", function(self, event, arg1)
 	if event == "ADDON_LOADED" then
@@ -2560,6 +2667,25 @@ ev:SetScript("OnEvent", function(self, event, arg1)
 		BS.rebidUsed       = {}
 		if BS.frame then BS.frame:Hide() end
 
+	elseif event == "TRADE_SKILL_SHOW" or event == "TRADE_SKILL_UPDATE" then
+		--[[
+			Opening a tradeskill is the only moment the client will say what a
+			character can make, so it is taken quietly every time rather than
+			asked for. TRADE_SKILL_UPDATE fires again as the list finishes
+			filling in, and harvesting merges, so reading it twice costs a few
+			table writes and catches the rows that were not there on the first.
+
+			Quiet on purpose: you opened alchemy to make something, not to hear
+			from an auction addon.
+		]]
+		if BS.HarvestRecipes and (GetTime() - (BS.lastHarvest or 0)) > 5 then
+			-- throttled because TRADE_SKILL_UPDATE also fires on every craft and
+			-- every filter change, and a harvest walks the whole list. What you
+			-- can make does not change while you are making it.
+			BS.lastHarvest = GetTime()
+			BS:HarvestRecipes(true)
+		end
+
 	elseif event == "UI_ERROR_MESSAGE" then
 		-- anything the UI complains about within a moment of a bid is the
 		-- server's answer to that bid
@@ -2628,7 +2754,10 @@ ev:SetScript("OnEvent", function(self, event, arg1)
 			BS:LocatePendingBid()
 			return
 		end
-		if not BS.scanning or not BS.awaitingResults then return end
+		if not BS.scanning or not BS.awaitingResults then
+			BS:MaybePiggyback()
+			return
+		end
 
 		local numBatch, total = GetNumAuctionItems("list")
 		total = total or 0
@@ -2773,6 +2902,20 @@ SlashCmdList["BIDSNIPER"] = function(msg)
 	elseif msg == "auto" then
 		BS.db.scanMethod = "auto"
 		BS:Print("Scan method: auto (GetAll when available, otherwise paged).")
+	elseif msg == "piggyback" then
+		BS.db.piggyback = not BS.db.piggyback
+		if BS.db.piggyback then
+			BS:Print("Shared scans |cff00ff00on|r - another addon's full scan is read as "
+				.. "if it were ours, so Auctionator's sweep fills this in too.")
+		else
+			BS:Print("Shared scans |cffff8800off|r - only scans you start here are read.")
+		end
+	elseif msg == "craft" then
+		BS:ShowCraft()
+	elseif msg == "recipes" then
+		BS:HarvestRecipes(false)
+	elseif msg == "crafts" then
+		BS:PrintCrafts()
 	elseif msg == "bids" then
 		BS:ShowMyBids()
 	elseif msg == "mybids" or msg == "checkbids" or msg == "listbids"
@@ -2809,6 +2952,10 @@ SlashCmdList["BIDSNIPER"] = function(msg)
 		BS:Print("/snipe resume - carry on from where a scan was interrupted")
 		BS:Print("/snipe auto | paged | getall | thorough - choose the scan method")
 		BS:Print("/snipe thorough - slowest, but never steps over an auction")
+		BS:Print("/snipe piggyback - read another addon's full scan as if it were ours")
+		BS:Print("/snipe craft - what your flasks and elixirs cost to make, and earn")
+		BS:Print("/snipe recipes - read your open alchemy window into the recipe list")
+		BS:Print("/snipe crafts - print the costings to chat")
 		BS:Print("/snipe mybids - open the record of every bid you have placed")
 		BS:Print("/snipe checkbids - fast check: your Bids tab and your mail")
 		BS:Print("/snipe findbids - slow check: search the auction house itself")

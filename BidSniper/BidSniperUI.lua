@@ -267,9 +267,12 @@ function BS:BuildUI()
 		.. "scans page by page.")
 	f.catBtn = catBtn
 
+	-- This row is packed to the frame edge, so the widths below are chosen to
+	-- add up rather than by eye: 282 + 96 + 124 + 96 + 92 + 100 and the gaps
+	-- between them land the last button 36px inside a 842-wide window.
 	local wishBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-	wishBtn:SetPoint("TOPLEFT", COL[3], FIELD2_Y)
-	wishBtn:SetWidth(120)
+	wishBtn:SetPoint("TOPLEFT", 282, FIELD2_Y)
+	wishBtn:SetWidth(96)
 	wishBtn:SetHeight(22)
 	wishBtn:SetText("Wishlist")
 	wishBtn:SetScript("OnClick", function()
@@ -281,8 +284,8 @@ function BS:BuildUI()
 	f.wishBtn = wishBtn
 
 	local wishScanBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-	wishScanBtn:SetPoint("TOPLEFT", COL[3] + 130, FIELD2_Y)
-	wishScanBtn:SetWidth(140)
+	wishScanBtn:SetPoint("TOPLEFT", 382, FIELD2_Y)
+	wishScanBtn:SetWidth(124)
 	wishScanBtn:SetHeight(22)
 	wishScanBtn:SetText("Scan wishlist")
 	wishScanBtn:SetScript("OnClick", function() BS:StartScan(false, "wishlist") end)
@@ -291,9 +294,27 @@ function BS:BuildUI()
 		.. "filters. Much quicker than a full scan.")
 	f.wishScanBtn = wishScanBtn
 
+	local craftBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+	craftBtn:SetPoint("TOPLEFT", 510, FIELD2_Y)
+	craftBtn:SetWidth(96)
+	craftBtn:SetHeight(22)
+	craftBtn:SetText("Craft")
+	craftBtn:SetScript("OnClick", function()
+		if not BS.craftFrame then return end
+		if BS.craftFrame:IsShown() then BS.craftFrame:Hide() else BS.craftFrame:Show() end
+	end)
+	Tip(craftBtn, "What your flasks and elixirs cost to make",
+		"Costs every flask and elixir you can make against the reagent prices from "
+		.. "your last scan, and says what it would earn.\n\n"
+		.. "The prices come out of a scan you were running anyway - each row is "
+		.. "checked against your reagents on its way past, so this costs no extra "
+		.. "queries and no extra waiting.\n\n"
+		.. "Open your alchemy window once and press Read recipes to fill it in.")
+	f.craftBtn = craftBtn
+
 	local rebidBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-	rebidBtn:SetPoint("TOPLEFT", 616, FIELD2_Y)
-	rebidBtn:SetWidth(96)
+	rebidBtn:SetPoint("TOPLEFT", 610, FIELD2_Y)
+	rebidBtn:SetWidth(92)
 	rebidBtn:SetHeight(22)
 	rebidBtn:SetText("Re-bid")
 	rebidBtn:SetScript("OnClick", function() BS:RebidOutbid() end)
@@ -305,8 +326,8 @@ function BS:BuildUI()
 	f.rebidBtn = rebidBtn
 
 	local myBidsBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-	myBidsBtn:SetPoint("TOPLEFT", 716, FIELD2_Y)
-	myBidsBtn:SetWidth(104)
+	myBidsBtn:SetPoint("TOPLEFT", 706, FIELD2_Y)
+	myBidsBtn:SetWidth(100)
 	myBidsBtn:SetHeight(22)
 	myBidsBtn:SetText("My bids")
 	myBidsBtn:SetScript("OnClick", function()
@@ -631,6 +652,7 @@ function BS:BuildUI()
 	self:BuildWishlistUI(f)
 	self:BuildCategoryUI(f)
 	self:BuildLedgerUI(f)
+	self:BuildCraftUI(f)
 
 	f.refreshers = { ratioEdit, maxBidEdit, minBuyEdit, minProfitEdit, qualityBtn,
 	                 catBtn, cbNoBids, cbSoon, cbOwn, cbAuto }
@@ -678,6 +700,7 @@ function BS:BuildCategoryUI(parent)
 	c:SetScript("OnShow", function()
 		if BS.wishFrame   then BS.wishFrame:Hide()   end
 		if BS.ledgerFrame then BS.ledgerFrame:Hide() end
+		if BS.craftFrame  then BS.craftFrame:Hide()  end
 		BS:RefreshCategories()
 	end)
 
@@ -910,6 +933,7 @@ function BS:BuildWishlistUI(parent)
 	w:SetScript("OnShow", function()
 		if BS.catFrame    then BS.catFrame:Hide()    end
 		if BS.ledgerFrame then BS.ledgerFrame:Hide() end
+		if BS.craftFrame  then BS.craftFrame:Hide()  end
 		BS:RefreshWishlist()
 	end)
 
@@ -1056,6 +1080,7 @@ function BS:BuildLedgerUI(parent)
 	g:SetScript("OnShow", function()
 		if BS.catFrame  then BS.catFrame:Hide()  end
 		if BS.wishFrame then BS.wishFrame:Hide() end
+		if BS.craftFrame then BS.craftFrame:Hide() end
 		BS:RefreshLedger()
 	end)
 
@@ -1208,6 +1233,573 @@ function BS:ShowLedger()
 	if not self.frame then return end
 	self.frame:Show()
 	local g = self.ledgerFrame
+	if not g then return end
+	if g:IsShown() then g:Hide() else g:Show() end
+end
+
+--=============================================================================
+--  what your flasks and elixirs cost to make
+--=============================================================================
+
+local CRAFT_ROWS  = 11
+local CRAFT_ROW_H = 22
+local DETAIL_ROWS = 7
+local DETAIL_ROW_H = 15
+
+--[[
+	The panel answers two questions that want different shapes.
+
+	"Which of these is worth making?" is a sorted list, and it is the top half.
+
+	"So what do I actually have to buy?" is a breakdown, and it is the bottom
+	half - either the reagents of whichever recipe you clicked, or, once you
+	have typed quantities against a few of them, the whole shopping list with
+	your bags already deducted.
+]]
+function BS:BuildCraftUI(parent)
+	local g = CreateFrame("Frame", "BidSniperCraftFrame", parent)
+	g:SetWidth(540)
+	g:SetHeight(560)
+	g:SetPoint("TOPLEFT", parent, "TOPRIGHT", 4, 0)
+	g:SetFrameStrata("HIGH")
+	g:SetToplevel(true)
+	g:SetBackdrop({
+		bgFile   = "Interface\\DialogFrame\\UI-DialogBox-Background",
+		edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
+		tile = true, tileSize = 32, edgeSize = 32,
+		insets = { left = 11, right = 12, top = 12, bottom = 11 },
+	})
+	g:EnableMouse(true)
+	g:Hide()
+	g:SetScript("OnShow", function()
+		if BS.catFrame    then BS.catFrame:Hide()    end
+		if BS.wishFrame   then BS.wishFrame:Hide()   end
+		if BS.ledgerFrame then BS.ledgerFrame:Hide() end
+		-- opening it is a request for the current answer, and both Auctionator's
+		-- database and your bags may have moved since it was last up
+		BS.craftCosted = nil
+		BS:RefreshCraft()
+	end)
+
+	local title = g:CreateFontString(nil, "ARTWORK")
+	Font(title, 12, 1, 0.82, 0)
+	title:SetPoint("TOP", 0, -14)
+	title:SetText("Flasks and elixirs")
+
+	local close = CreateFrame("Button", nil, g, "UIPanelCloseButton")
+	close:SetPoint("TOPRIGHT", -6, -6)
+
+	local help = g:CreateFontString(nil, "ARTWORK")
+	Font(help, 10, 0.6, 0.6, 0.6)
+	help:SetPoint("TOPLEFT", 18, -36)
+	help:SetWidth(500)
+	help:SetJustifyH("LEFT")
+	help:SetText("Priced from the last scan, at no extra cost. Orange means an estimate. "
+		.. "Click a row for its reagents; type how many you want to make and the "
+		.. "shopping list works out the rest.")
+
+	local heads = { { "Recipe", 2, 150, "LEFT" }, { "Can make", 156, 56, "RIGHT" },
+	                { "Want", 218, 40, "CENTER" }, { "Reagents", 264, 78, "RIGHT" },
+	                { "Profit", 346, 86, "RIGHT" } }
+	for _, h in ipairs(heads) do
+		local fs = g:CreateFontString(nil, "ARTWORK")
+		Font(fs, 10, 0.8, 0.8, 0.8)
+		fs:SetPoint("TOPLEFT", 18 + h[2], -78)
+		fs:SetWidth(h[3])
+		fs:SetJustifyH(h[4])
+		fs:SetText(h[1])
+	end
+
+	local scroll = CreateFrame("ScrollFrame", "BidSniperCraftScroll", g, "FauxScrollFrameTemplate")
+	scroll:SetPoint("TOPLEFT", 18, -92)
+	scroll:SetWidth(462)
+	scroll:SetHeight(CRAFT_ROWS * CRAFT_ROW_H)
+	scroll:SetScript("OnVerticalScroll", function(self, offset)
+		FauxScrollFrame_OnVerticalScroll(self, offset, CRAFT_ROW_H, function() BS:RefreshCraft() end)
+	end)
+	g.scroll = scroll
+
+	g.rows = {}
+	for i = 1, CRAFT_ROWS do
+		local row = CreateFrame("Button", nil, g)
+		row:SetWidth(440)
+		row:SetHeight(CRAFT_ROW_H)
+		if i == 1 then
+			row:SetPoint("TOPLEFT", scroll, "TOPLEFT", 0, 0)
+		else
+			row:SetPoint("TOPLEFT", g.rows[i - 1], "BOTTOMLEFT", 0, 0)
+		end
+		row:SetHighlightTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight")
+
+		row.cells = {}
+		local layout = { { 2, 150, "LEFT" }, { 156, 56, "RIGHT" },
+		                 { 264, 78, "RIGHT" }, { 346, 86, "RIGHT" } }
+		for c, l in ipairs(layout) do
+			local fs = row:CreateFontString(nil, "ARTWORK")
+			Font(fs, 11, 1, 1, 1)
+			fs:SetPoint("LEFT", l[1], 0)
+			fs:SetWidth(l[2])
+			fs:SetJustifyH(l[3])
+			row.cells[c] = fs
+		end
+
+		--[[
+			How many to make, typed straight onto the row.
+
+			These boxes are reused as the list scrolls, so the recipe a box
+			belongs to changes underneath it. That is the whole difficulty, and
+			it is why a box carries `owner` - the name of the recipe it is
+			currently standing for - and why every write goes to that name and
+			never to whatever happens to be in the row slot at the time.
+
+			It also commits on each keystroke rather than waiting for Enter or
+			for focus to move. Anything held back is something a scroll can
+			carry onto the wrong recipe: clear a number, scroll, and the pending
+			edit lands on whichever item scrolled into that slot. Committing as
+			you type means there is never anything pending to misplace.
+		]]
+		local want = CreateFrame("EditBox", nil, row)
+		want:SetPoint("LEFT", 218, 0)
+		want:SetWidth(40)
+		want:SetHeight(18)
+		want:SetAutoFocus(false)
+		want:SetNumeric(true)
+		want:SetMaxLetters(4)
+		want:SetJustifyH("CENTER")
+		want:SetTextInsets(2, 2, 0, 0)
+		want:SetBackdrop({
+			bgFile   = "Interface\\ChatFrame\\ChatFrameBackground",
+			edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+			tile = true, tileSize = 16, edgeSize = 10,
+			insets = { left = 2, right = 2, top = 2, bottom = 2 },
+		})
+		want:SetBackdropColor(0, 0, 0, 0.65)
+		want:SetBackdropBorderColor(0.45, 0.45, 0.45, 1)
+		Font(want, 11, 1, 1, 1)
+
+		-- `painting` marks the addon writing into the box, so putting the saved
+		-- number back does not read as the user typing it
+		local function commit(self)
+			if self.painting or not self.owner then return end
+			BS:SetWant(self.owner, self:GetText())
+		end
+		want:SetScript("OnTextChanged", commit)
+		want:SetScript("OnEnterPressed", function(self) self:ClearFocus() end)
+		want:SetScript("OnEditFocusLost", commit)
+		want:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
+		row.want = want
+
+		row:SetScript("OnClick", function(self)
+			if not self.costed then return end
+			-- clicking the row you are already looking at puts the shopping
+			-- list back, so one control does both directions
+			if BS.craftPick == self.costed.name and BS.craftView == "recipe" then
+				BS.craftView = "shopping"
+			else
+				BS.craftPick = self.costed.name
+				BS.craftView = "recipe"
+			end
+			BS:RefreshCraft()
+		end)
+
+		row:SetScript("OnEnter", function(self)
+			local c = self.costed
+			if not c then return end
+			GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+			if c.link then GameTooltip:SetHyperlink(c.link)
+			else GameTooltip:SetText(c.name, 1, 1, 1) end
+
+			GameTooltip:AddLine(" ")
+			for _, line in ipairs(c.lines) do
+				local left = format("%dx %s", line.need, line.name)
+				if line.vendor then
+					GameTooltip:AddDoubleLine(left, "vendor, not costed",
+						0.9, 0.9, 0.9, 0.6, 0.8, 1)
+				elseif not line.unit then
+					GameTooltip:AddDoubleLine(left, "none for sale", 0.9, 0.9, 0.9, 1, 0.3, 0.3)
+				elseif line.src == "scan" then
+					GameTooltip:AddDoubleLine(left, BS.Money(line.total),
+						0.9, 0.9, 0.9, 1, 1, 1)
+				else
+					GameTooltip:AddDoubleLine(left,
+						BS.Money(line.total) .. (line.src == "auctionator" and " (Atr)" or " (old)"),
+						0.9, 0.9, 0.9, 1, 0.6, 0.2)
+				end
+			end
+
+			GameTooltip:AddLine(" ")
+			GameTooltip:AddDoubleLine("Costs to make", BS.Money(c.cost), 1, 1, 1)
+			if c.yield > 1 then
+				GameTooltip:AddDoubleLine("Makes", format("%g", c.yield), 0.8, 0.8, 0.8)
+			end
+			if c.sellUnit then
+				GameTooltip:AddDoubleLine("Sells for", BS.Money(c.revenue), 1, 1, 1)
+			end
+			if c.profit then
+				GameTooltip:AddDoubleLine("Profit", BS.Money(c.profit),
+					1, 1, 1, c.profit >= 0 and 0.2 or 1, c.profit >= 0 and 1 or 0.3, 0.2)
+				GameTooltip:AddDoubleLine("After 5% AH cut", BS.Money(c.afterCut), 0.6, 0.6, 0.6)
+			end
+			GameTooltip:AddDoubleLine("From what is in your bags",
+				format("%d", c.canMake or 0), 0.8, 0.8, 0.8, 1, 0.82, 0)
+
+			if not c.exact then
+				GameTooltip:AddLine(" ")
+				GameTooltip:AddLine("This is an estimate:", 1, 0.6, 0.2)
+				for _, why in ipairs(c.doubts) do
+					GameTooltip:AddLine("  " .. why, 1, 0.6, 0.2, true)
+				end
+			end
+
+			GameTooltip:AddLine(" ")
+			GameTooltip:AddLine("Click for its reagents and what you hold.", 0.5, 0.8, 1)
+			GameTooltip:Show()
+		end)
+		row:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
+		row:Hide()
+		g.rows[i] = row
+	end
+
+	------------------------------------------------------------- breakdown --
+	local divider = g:CreateTexture(nil, "ARTWORK")
+	divider:SetTexture("Interface\\Tooltips\\UI-Tooltip-Border")
+	divider:SetPoint("TOPLEFT", 18, -92 - CRAFT_ROWS * CRAFT_ROW_H - 6)
+	divider:SetWidth(500)
+	divider:SetHeight(2)
+	divider:SetVertexColor(0.4, 0.4, 0.4, 0.8)
+
+	local detailTitle = g:CreateFontString(nil, "ARTWORK")
+	Font(detailTitle, 11, 1, 0.82, 0)
+	detailTitle:SetPoint("TOPLEFT", 18, -92 - CRAFT_ROWS * CRAFT_ROW_H - 14)
+	detailTitle:SetWidth(500)
+	detailTitle:SetJustifyH("LEFT")
+	g.detailTitle = detailTitle
+
+	local detailScroll = CreateFrame("ScrollFrame", "BidSniperCraftDetailScroll", g,
+		"FauxScrollFrameTemplate")
+	detailScroll:SetPoint("TOPLEFT", 18, -92 - CRAFT_ROWS * CRAFT_ROW_H - 30)
+	detailScroll:SetWidth(462)
+	detailScroll:SetHeight(DETAIL_ROWS * DETAIL_ROW_H)
+	detailScroll:SetScript("OnVerticalScroll", function(self, offset)
+		FauxScrollFrame_OnVerticalScroll(self, offset, DETAIL_ROW_H, function() BS:RefreshCraft() end)
+	end)
+	g.detailScroll = detailScroll
+
+	g.detailRows = {}
+	for i = 1, DETAIL_ROWS do
+		local fs = g:CreateFontString(nil, "ARTWORK")
+		Font(fs, 10, 0.9, 0.9, 0.9)
+		fs:SetPoint("TOPLEFT", detailScroll, "TOPLEFT", 0, -(i - 1) * DETAIL_ROW_H)
+		fs:SetWidth(462)
+		fs:SetJustifyH("LEFT")
+		g.detailRows[i] = fs
+	end
+
+	local detailFoot = g:CreateFontString(nil, "ARTWORK")
+	Font(detailFoot, 10, 0.7, 0.7, 0.7)
+	detailFoot:SetPoint("TOPLEFT", 18, -92 - CRAFT_ROWS * CRAFT_ROW_H - 34 - DETAIL_ROWS * DETAIL_ROW_H)
+	detailFoot:SetWidth(500)
+	detailFoot:SetJustifyH("LEFT")
+	g.detailFoot = detailFoot
+
+	--------------------------------------------------------------- buttons --
+	local readBtn = CreateFrame("Button", nil, g, "UIPanelButtonTemplate")
+	readBtn:SetPoint("BOTTOMLEFT", 18, 18)
+	readBtn:SetWidth(112)
+	readBtn:SetHeight(24)
+	readBtn:SetText("Read recipes")
+	readBtn:SetScript("OnClick", function() BS:HarvestRecipes(false) end)
+	Tip(readBtn, "Read your alchemy window",
+		"The client will not say what a character can make unless the tradeskill "
+		.. "window is open. It is read automatically whenever you open alchemy, so "
+		.. "this is only here for when you want to force it.\n\n"
+		.. "It merges rather than replaces, so a search box or a 'have materials' "
+		.. "tick cannot wipe out recipes it could not see.")
+
+	local listBtn = CreateFrame("Button", nil, g, "UIPanelButtonTemplate")
+	listBtn:SetPoint("BOTTOMLEFT", 136, 18)
+	listBtn:SetWidth(112)
+	listBtn:SetHeight(24)
+	listBtn:SetText("Shopping list")
+	listBtn:SetScript("OnClick", function()
+		BS.craftView = "shopping"
+		BS:RefreshCraft()
+	end)
+	Tip(listBtn, "What to go and buy",
+		"Adds up the reagents for everything you have put a number against, takes "
+		.. "off what is in your bags, and prices what is left.\n\n"
+		.. "Bags only. What is in the bank is mentioned in grey beside anything you "
+		.. "are short of, but never deducted - it may be there on purpose, and that "
+		.. "is your call rather than an assumption made for you.\n\n"
+		.. "Vials are listed on their own. They come off a vendor, so they are not "
+		.. "part of any cost here - but you still need to know how many to pick up.")
+
+	local recalcBtn = CreateFrame("Button", nil, g, "UIPanelButtonTemplate")
+	recalcBtn:SetPoint("BOTTOMLEFT", 254, 18)
+	recalcBtn:SetWidth(100)
+	recalcBtn:SetHeight(24)
+	recalcBtn:SetText("Recalculate")
+	recalcBtn:SetScript("OnClick", function()
+		BS.craftCosted = nil		-- drop the costing and work it out again
+		BS:RefreshCraft()
+	end)
+	Tip(recalcBtn, "Do the sums again",
+		"Costs everything out again from the prices and bag contents on hand. Free "
+		.. "and instant - it asks the auction house for nothing.\n\n"
+		.. "Worth pressing after an Auctionator scan, and after you buy or use mats.")
+
+	local clearBtn = CreateFrame("Button", nil, g, "UIPanelButtonTemplate")
+	clearBtn:SetPoint("BOTTOMLEFT", 360, 18)
+	clearBtn:SetWidth(90)
+	clearBtn:SetHeight(24)
+	clearBtn:SetText("Clear plan")
+	clearBtn:SetScript("OnClick", function() BS:ClearWants() end)
+	Tip(clearBtn, "Forget the quantities",
+		"Empties every number in the Want column. The recipes themselves stay.")
+
+	local forgetBtn = CreateFrame("Button", nil, g, "UIPanelButtonTemplate")
+	forgetBtn:SetPoint("BOTTOMLEFT", 456, 18)
+	forgetBtn:SetWidth(66)
+	forgetBtn:SetHeight(24)
+	forgetBtn:SetText("Forget")
+	forgetBtn:SetScript("OnClick", function() BS:ForgetRecipes() end)
+	Tip(forgetBtn, "Empty the recipe list",
+		"For when you have unlearned something, or read the wrong tradeskill in. "
+		.. "Open alchemy to build it again.")
+
+	local count = g:CreateFontString(nil, "ARTWORK")
+	Font(count, 11, 0.7, 0.7, 0.7)
+	count:SetPoint("BOTTOMRIGHT", -18, 48)
+	g.count = count
+
+	self.craftFrame = g
+	self.craftView  = self.craftView or "shopping"
+end
+
+--=============================================================================
+--  painting it
+--=============================================================================
+
+-- Writing the stored number back into a box, flagged so the box's own
+-- OnTextChanged knows this was us and not somebody typing.
+local function SetWantText(box, want)
+	box.painting = true
+	box:SetText((want and want > 0) and tostring(want) or "")
+	box.painting = nil
+end
+
+-- "have / need", green once you are holding enough
+local function HaveText(have, need)
+	local colour = (have >= need) and "|cff00ff00" or "|cffff8800"
+	return format("%s%d|r/%d", colour, have, need)
+end
+
+local function PaintRecipeDetail(g, name)
+	local r = BS:Recipes()[name]
+	if not r then
+		g.detailTitle:SetText("|cff888888that recipe is no longer on the list|r")
+		return {}, ""
+	end
+
+	local c = BS:CostRecipe(r)
+	g.detailTitle:SetText(format("|cffffffff%s|r  -  you can make |cffffd100%d|r "
+		.. "from what you hold", name, c.canMake or 0))
+
+	local lines, banked = {}, 0
+	for _, line in ipairs(c.lines) do
+		local note = line.vendor and "  |cff88bbffvendor|r"
+			or (line.unit and ("  " .. BS.Money(line.unit) .. " each") or "  |cffff5555none up|r")
+		local short = math.max(0, line.need - line.have)
+		if (line.bank or 0) > 0 then banked = banked + 1 end
+
+		lines[#lines + 1] = format("%s  %s%s%s%s", HaveText(line.have, line.need),
+			line.name, note,
+			short > 0 and format("   |cffff8800need %d more|r", short) or "",
+			-- grey and last: a reminder, not part of the sum
+			(line.bank or 0) > 0 and format("   |cff777777%d in bank|r", line.bank) or "")
+	end
+
+	return lines, format("Counting your bags only. Costs %s to make one, and you are "
+		.. "carrying enough for %d.%s",
+		BS.Money(c.cost), c.canMake or 0,
+		banked > 0 and "  Some of it is in the bank - see the grey notes." or "")
+end
+
+local function PaintShoppingList(g)
+	local buy, vendor, cost, exact = BS:ShoppingList()
+
+	if #buy == 0 and #vendor == 0 then
+		g.detailTitle:SetText("|cffffffffShopping list|r  -  "
+			.. "|cff888888type a number in Want against anything you plan to make|r")
+		return {}, ""
+	end
+
+	g.detailTitle:SetText(format("|cffffffffShopping list|r  -  buy %s%s",
+		BS.Money(cost), exact and "" or "  |cffff8800(estimate)|r"))
+
+	-- grey, last on the line, and never part of the arithmetic
+	local function bankNote(e)
+		if (e.inBank or 0) <= 0 then return "" end
+		return format("   |cff777777%d of those are in your bank|r", e.inBank)
+	end
+
+	local lines, banked = {}, 0
+	for _, e in ipairs(buy) do
+		if (e.inBank or 0) > 0 then banked = banked + 1 end
+		if e.short > 0 then
+			lines[#lines + 1] = format("|cffffffff%d|r %s   %s%s%s",
+				e.short, e.name,
+				e.unit and BS.Money(e.unit * e.short) or "|cffff5555no price|r",
+				e.have > 0 and format("   |cff888888(need %d, have %d)|r", e.total, e.have) or "",
+				bankNote(e))
+		else
+			lines[#lines + 1] = format("|cff00ff00have all %d|r %s", e.total, e.name)
+		end
+	end
+
+	for _, e in ipairs(vendor) do
+		if (e.inBank or 0) > 0 then banked = banked + 1 end
+		lines[#lines + 1] = format("|cff88bbff%d|r %s   |cff88bbfffrom the vendor|r%s%s",
+			e.short, e.name,
+			e.have > 0 and format("   |cff888888(need %d, have %d)|r", e.total, e.have) or "",
+			bankNote(e))
+	end
+
+	local extras = ""
+	if #vendor > 0 then
+		local n = 0
+		for _, e in ipairs(vendor) do n = n + e.short end
+		extras = format("  Plus %d vial%s off a vendor, not counted in that total.",
+			n, n == 1 and "" or "s")
+	end
+	if banked > 0 then
+		extras = extras .. format("  |cff777777%d of these you also have in the bank, "
+			.. "not deducted.|r", banked)
+	end
+
+	return lines, format("What you are short after your bags. The bank is never "
+		.. "deducted.%s", extras)
+end
+
+function BS:RefreshCraft()
+	local g = self.craftFrame
+	if not g or not g:IsShown() then return end
+
+	--[[
+		Painting moves focus off boxes whose row has changed hands, and losing
+		focus commits, and committing asks for a repaint - so this can be called
+		from inside itself. Re-entering half way through would paint rows from
+		one list and the breakdown from another. Instead the inner call just
+		notes that something moved, and the outer one goes round again once it
+		has finished.
+	]]
+	if self.craftPainting then
+		self.craftDirty = true
+		return
+	end
+	self.craftPainting = true
+
+	--[[
+		Painted from the last costing rather than costed afresh, because this
+		also runs on every tick of the scroll wheel and the fallback price
+		lookups reach into Auctionator. The costing is thrown away whenever
+		something that feeds it moves - a scan, a harvest, a quantity, or the
+		panel being opened - so it can never show figures older than the prices
+		and bags behind them.
+	]]
+	local list = self.craftCosted or self:CostAll()
+
+	local offset = FauxScrollFrame_GetOffset(g.scroll) or 0
+	for i = 1, CRAFT_ROWS do
+		local row = g.rows[i]
+		local c   = list[offset + i]
+		if c then
+			row.costed = c
+
+			local colour = c.exact and "|cffffffff" or "|cffff8800"
+			local picked = (self.craftView == "recipe" and self.craftPick == c.name)
+			row.cells[1]:SetText((picked and "|cffffd100> |r" or "") .. colour .. c.name .. "|r")
+			row.cells[2]:SetText((c.canMake or 0) > 0
+				and ("|cff00ff00" .. c.canMake .. "|r") or "|cff6666660|r")
+			row.cells[3]:SetText(BS.Money(c.cost))
+
+			if c.profit then
+				row.cells[4]:SetText(c.profit >= 0
+					and ("|cff00ff00+" .. BS.MoneyPlain(c.profit) .. "|r")
+					or  ("|cffff4444-" .. BS.MoneyPlain(-c.profit) .. "|r"))
+			else
+				row.cells[4]:SetText("|cff666666?|r")
+			end
+
+			--[[
+				Rebind the box when the slot changes hands. Focus goes with the
+				recipe that is leaving: a cursor sitting in a box that now
+				stands for something else is how a number ends up typed against
+				the wrong item.
+			]]
+			local box = row.want
+			if box.owner ~= c.name then
+				if box:HasFocus() then box:ClearFocus() end
+				box.owner = c.name
+				SetWantText(box, c.want)
+			elseif not box:HasFocus() then
+				-- same recipe, and nobody is typing: show what is stored
+				SetWantText(box, c.want)
+			end
+			box:Show()
+			row:Show()
+		else
+			row.costed = nil
+			row.want.owner = nil
+			SetWantText(row.want, nil)
+			row.want:Hide()
+			row:Hide()
+		end
+	end
+	FauxScrollFrame_Update(g.scroll, #list, CRAFT_ROWS, CRAFT_ROW_H)
+
+	----------------------------------------------------------- breakdown --
+	local lines, foot
+	if self.craftView == "recipe" and self.craftPick then
+		lines, foot = PaintRecipeDetail(g, self.craftPick)
+	else
+		lines, foot = PaintShoppingList(g)
+	end
+
+	local dOffset = FauxScrollFrame_GetOffset(g.detailScroll) or 0
+	for i = 1, DETAIL_ROWS do
+		g.detailRows[i]:SetText(lines[dOffset + i] or "")
+	end
+	FauxScrollFrame_Update(g.detailScroll, #lines, DETAIL_ROWS, DETAIL_ROW_H)
+	g.detailFoot:SetText(foot or "")
+
+	--------------------------------------------------------------- count --
+	local exact, planned = 0, 0
+	for _, c in ipairs(list) do
+		if c.exact then exact = exact + 1 end
+		if (c.want or 0) > 0 then planned = planned + 1 end
+	end
+
+	if #list == 0 then
+		g.count:SetText("|cffff8800no recipes - open your alchemy window|r")
+	else
+		g.count:SetText(format("%d recipe%s%s%s", #list, #list == 1 and "" or "s",
+			exact < #list and format("  -  |cffff8800%d estimated|r", #list - exact) or "",
+			planned > 0 and format("  -  |cffffd100%d planned|r", planned) or ""))
+	end
+
+	self.craftPainting = nil
+	if self.craftDirty then
+		self.craftDirty = nil
+		self:RefreshCraft()
+	end
+end
+
+function BS:ShowCraft()
+	if not self.frame then return end
+	self.frame:Show()
+	local g = self.craftFrame
 	if not g then return end
 	if g:IsShown() then g:Hide() else g:Show() end
 end

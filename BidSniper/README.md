@@ -253,6 +253,101 @@ fastest scan available.
 
 ---
 
+## Flasks and elixirs
+
+**Craft** costs out every flask and elixir you can make against current reagent
+prices, and says what each one would earn.
+
+**Setup is opening your alchemy window once.** The client won't say what a
+character can make unless that window is open, so BidSniper reads it the moment
+you do — no button to press — and keeps the recipes through logging out. Only
+flasks and elixirs are kept, decided by the crafted item's own subclass rather
+than a list of names that would go stale.
+
+### The prices are free
+
+Reagent prices come out of the scan you were running anyway. Every row a scan
+reads is checked against your reagent names on the way past — one hash lookup,
+the same trick that settles bids — and the cheapest buyout per unit is kept. The
+crafting tab never sends a single query of its own.
+
+**Including a scan you started somewhere else.** GetAll's ~15 minute cooldown is
+shared by every addon on the client, so running Auctionator's full scan and then
+BidSniper's meant waiting a quarter of an hour to read the same data twice. The
+dump lands in the auction list all addons share, so BidSniper now walks it too:
+press **full scan** in Auctionator and your bids, profits and reagent prices all
+fill in beside it. One request, one cooldown, both sets of answers. It takes
+smaller bites while doing this so Auctionator still gets its frames. `/snipe
+piggyback` turns it off.
+
+### What you're holding, and what to buy
+
+**Can make** is how many you could produce right now out of your bags, without
+buying or fetching anything.
+
+**Click a recipe** and the lower half shows its reagents as `have/need`, green
+once you have enough, with how many more you're short.
+
+**Type a number in Want** against anything you plan to make, then press
+**Shopping list**. It adds up the reagents for the whole plan, deducts your bags
+*once* across everything — do it per recipe and two things sharing a reagent
+would each claim the same stack — and prices what's left.
+
+### The bank is mentioned, never counted
+
+Every figure uses your bags alone. What's in the bank may well be there on
+purpose, and a shopping list that assumed you'd go and fetch it would be planning
+your trip for you.
+
+It's still reported: anything you're short of carries a grey `12 of those are in
+your bank` after the price, so a stack you'd forgotten is a stack you get told
+about. It never changes a number.
+
+> The bank count is only as good as what the client cached the last time you
+> opened your bank. If you haven't opened it this session it reads zero — no note
+> is not proof there's nothing there.
+
+**Vials are listed separately and not costed.** They come off a vendor at a fixed
+few silver, so putting them in a profit figure only muddies it; but you still
+need to know how many to pick up after the auction house, so they get their own
+line with a count. A recipe whose vials you don't have still reports 0 in **Can
+make**, because you genuinely can't make it.
+
+That check sits ahead of the filters, because it has to: reagents are cheap bulk
+goods and **Min buyout** and **Min ratio** would throw away every one of them.
+Only buyouts count, never bids — you can't plan a craft around an auction you
+might be outbid on.
+
+### Exact, or an estimate that says why
+
+| Row | Meaning |
+| --- | --- |
+| White | Every figure came from the most recent scan |
+| Orange | An estimate — hover to see which reagent made it one |
+| `?` in Profit | A reagent has no price anywhere, so there's no honest figure |
+
+"Most recent" means that scan, not recently-ish: a price from the scan before
+last is a price for a market that has since moved. Anything else — Auctionator's
+database, an older sweep, nothing at all — is named in the tooltip, reagent by
+reagent.
+
+A missing reagent is never costed as free. That would make the recipe you know
+least about look like the most profitable one on the list, so it gets no profit
+figure at all.
+
+**After an Auctionator scan, press Recalculate.** Auctionator is read live rather
+than cached, so it picks up its new prices immediately — that's where the figures
+for anything your last BidSniper scan didn't see come from.
+
+Reagents are costed at what it would take to buy them, not at what's in your
+bags. What you already own is a sunk cost, and the question is whether turning
+materials into a flask is worth doing at today's prices either way.
+
+Profit is raw; the 5% auction house cut is in the tooltip, as with the results
+list.
+
+---
+
 ## Scan methods
 
 **GetAll** pulls the entire auction house in one request and takes seconds.
