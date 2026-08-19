@@ -15,6 +15,9 @@ Drop the `BidSniper` folder into `Interface\AddOns\`, so you end up with:
 Interface/AddOns/BidSniper/BidSniper.toc
 Interface/AddOns/BidSniper/BidSniper.lua
 Interface/AddOns/BidSniper/BidSniperLedger.lua
+Interface/AddOns/BidSniper/BidSniperCraft.lua
+Interface/AddOns/BidSniper/BidSniperSell.lua
+Interface/AddOns/BidSniper/BidSniperBuy.lua
 Interface/AddOns/BidSniper/BidSniperUI.lua
 ```
 
@@ -62,7 +65,7 @@ the **Market** and **Profit** columns. Everything else works without it.
 | Item | Name, the grey `x20` stack size, and `(4 up)` when several identical auctions share the row — see [One row, several auctions](#one-row-several-auctions) |
 | Bid | What it costs you to be high bidder on **one** of them |
 | Buyout | The seller's buyout price, for one |
-| Ratio | Buyout ÷ bid — how good it *looks* |
+| Ratio | What it's worth ÷ what a bid costs — see [Ratio](#ratio-is-against-what-its-worth) |
 | Market | What the row is worth: one stack's value × how many are still up |
 | Profit | Market − what the row costs — what you actually stand to make from all of them |
 
@@ -138,8 +141,8 @@ alone and reported.
 
 | Filter | Meaning |
 | --- | --- |
-| **Min ratio** | How many times bigger the buyout must be than the bid |
-| **Max bid** | Ignore anything costing more than this to bid on. `0` = no limit |
+| **Min ratio** | How many times over a bid pays you back, against what the item is worth |
+| **Max bid each** | Ignore anything costing more than this to bid on **for one of them**. `0` = no limit |
 | **Min buyout** | Ignore junk below this buyout |
 | **Min quality** | Click to step up, right-click to step back |
 | **Min profit** | Bulk ticking skips rows worth less than this over their bid. `0` = no limit |
@@ -150,7 +153,83 @@ alone and reported.
 
 Money boxes accept `50`, `50g`, `1s50c` — a plain number means gold.
 
-Defaults are ratio `10x`, max bid `50g`, min buyout `1g`.
+Defaults are ratio `10x`, max bid `50g` each, min buyout `1g`.
+
+### Ratio is against what it's worth
+
+**Ratio is what the item is worth divided by what it costs you to bid on it.**
+Not the seller's buyout.
+
+The buyout was never a valuation — it's one person's asking price, and anyone
+can list a grey at 100g and make the ratio read wonderfully. The column used to
+have to be described as how good a deal *looked*.
+
+What it's worth is what somebody is actually asking for one right now: the
+lowest buyout on the house. Both BidSniper's own scan and Auctionator hold that
+figure, and they are the same number by different routes — BidSniper's is
+usually fresher, because it came from the sweep you just ran, so it's used
+first.
+
+For a stack, it's the whole stack's worth over one bid, because one bid buys the
+whole stack.
+
+| Ratio reads | Meaning |
+| --- | --- |
+| `18.4x` | A bid gets you eighteen times its own value back |
+| `7.5x?` in grey | Nothing is known about this item, so that figure is only the seller's buyout over the bid — treat it as "find out first" |
+
+The grey `?` is the same shorthand **Profit** uses, and it means the same thing.
+An unpriced item is the case to look at *hardest*, not the case to throw away —
+it's exactly where something unrecognised hides — so it's kept and marked rather
+than dropped.
+
+Hovering a row shows both readings, so you can always see what the seller
+thinks alongside what the market says.
+
+> **Where the scan is deliberately generous.** Working out a ratio needs a
+> price, and a scan can't go looking one up forty thousand times without
+> crawling. So the scan keeps a wider net — it takes the better of the two
+> readings from what's already in hand and keeps the row if *either* clears the
+> bar — and the list makes the real decision. Junk at 100g still gets past the
+> scan and is thrown out by the list, where the mistake is free. Something worth
+> far more than its own buyout gets in too, which the old buyout-only test
+> dropped for ever.
+
+### The filters are a window, not a sieve
+
+**Move a filter and the table repaints immediately.** No rescan. The scan's
+results stay as they are and the filters decide what you see of them, so you can
+tighten Min ratio to 12, look, and put it back to 10 with nothing lost.
+
+There is one thing this cannot do, and it says so rather than pretending: an
+auction the scan dropped was never written down, so **loosening a filter past
+where it stood during the scan needs a new scan**. Set Min ratio to 8 after
+scanning at 10 and you get a line in orange telling you exactly that. Press
+**Scan AH** and the auctions it skipped come in.
+
+**Refresh** goes over the list again without asking the auction house for
+anything: it re-applies the filters, drops auctions that have certainly ended,
+and rebuilds the Profit column from current prices — which is what you want
+straight after an Auctionator scan. Changing a filter does not need it.
+
+### Max bid is per item
+
+A stack of twenty at a 40g bid is **2g each**, and 2g is what you are being
+asked to pay for one of them. A limit that judged the 40g would throw away every
+stack on the house, which made Max bid useless for anything sold in bulk — the
+things you most want to buy in bulk.
+
+The auction still costs the whole 40g to bid on. That side is guarded where it
+belongs: the BID button always shows what one press spends, and a batch asks you
+to approve the total before it starts.
+
+> One consequence, and it only touches `paged`. That method used to stop as soon
+> as the server's bid-sorted list passed your Max bid — everything beyond was
+> too expensive to qualify, so the lower your Max bid the shorter the scan. Per
+> item, that no longer holds: a 400g bid on a stack of two hundred is 2g each
+> and sits far down a list ordered by the 400, so nothing on one page bounds
+> what a later one is worth per item. **A paged scan now reads to the end.**
+> GetAll never paged and is unaffected, and `auto` reaches for GetAll first.
 
 ### Min profit — a selection filter, not a scan filter
 
@@ -253,10 +332,159 @@ fastest scan available.
 
 ---
 
+## Buying
+
+The **Buy** tab, second from the left. Search an item and it lists every auction
+of it, cheapest per item first — which is the whole of a shopping addon's buy
+tab, and still the right answer when you only want the cheap one.
+
+Case doesn't matter, but the whole name does: `deadnettle` finds Deadnettle,
+`copper` finds nothing, because a page of Copper Bars, Copper Ore and Copper
+Rods is not a thing you can plan a purchase of. Type half a name and it tells
+you what it found instead of claiming there is nothing there.
+
+What it adds is the other question: **how many do you want?** Type a number in
+**How many** and the plan underneath is the cheapest *set* of auctions that gets
+you at least that many.
+
+That is not the same as buying down the list. Say you want 20, and the house has
+twenty singles at 3g and one stack of 25 at 4g each. Cheapest-first buys the
+singles for 60g. Ask for 24 and cheapest-first runs out of singles at 20 and has
+to reach for the stack anyway — while that one stack alone is 100g for 25 items,
+one purchase, and five items you didn't have to go looking for. Which of those
+is better depends on the number you asked for, and that is arithmetic worth
+doing rather than eyeballing.
+
+| Column | Meaning |
+| --- | --- |
+| Per item | Buyout ÷ stack size — what one of them costs you |
+| Stack | How many are in one auction |
+| Up | How many identical auctions are at this exact price |
+| Each | The buyout for one of those auctions |
+| All of it | What taking every auction at this price would cost |
+| Seller | Who posted it, or `several` when more than one is asking exactly this |
+| Left | Time left |
+| In plan | How many of these the plan below is taking |
+
+* **Click a listing** to buy from that one alone — the seller you know, the
+  stack size that suits, the auction about to end. It takes as many of that
+  listing as your number needs.
+* **Ctrl-click** takes every one of them.
+* **Shift-click** links the item into chat.
+* **Right-click** looks the item up in the normal Browse tab.
+* **Best mix** puts the worked-out plan back after either of those.
+
+### Shift-click anything to look it up
+
+**Shift-click an item anywhere — your bags, a link in chat, a loot window, the
+tradeskill list — and this page opens on it and searches.** It doesn't matter
+which tab you were on; the window comes up, the Buy tab comes forward, the name
+lands in the box and the search runs.
+
+Shift-click already means something, though, so it stays out of the way where it
+does:
+
+* away from the auction house, where there is nothing to search;
+* while you're typing in chat — shift-click there means "insert the link", and
+  hijacking that mid-sentence would be unforgivable;
+* on rows that link an item into chat on purpose, which is what shift-click does
+  on both the auction table and the Buy listings;
+* and with the wishlist box open and focused, where the name goes into the box —
+  which is what the wishlist has always said shift-click does.
+
+**Shift-click search** turns it off, for anyone who shift-clicks items into the
+Browse box all day and would rather we kept out of it.
+
+### More for less always wins
+
+The list on the right is every *other* quantity worth having, and it exists
+because the number you typed is rarely the number that is good value. Sixty in
+three stacks is routinely cheaper per item than the fifty you asked for.
+
+**Everything on it reaches your number.** Asking for fifty and being shown one,
+or eight, is not being shown a way to buy fifty — picking it would quietly
+abandon what you asked for. So quantities below the target are not choices and
+are not listed. When nothing reaches it, there is one line saying how close you
+can get: the whole of what is for sale, marked `all there is`.
+
+**And everything past the first is better value per item.** There is only ever
+one reason to buy more than you asked for: 53 instead of 50 because the 13 came
+at a better price than the 10. The same plan with one more single auction stuck
+on the end is not a reason — it is more gold for more items at the same rate,
+which is not a deal, it's a bigger bill. A row has to beat the cheapest answer
+on price per item, by a margin you'd change your mind over rather than by a
+hundredth of a silver, or it isn't listed.
+
+Very often that leaves one line, and the heading says so: *buying more is no
+better value*. That is an answer, and a useful one.
+
+One rule governs the rest: **a quantity that hands you more items for the same
+gold or less is never a worse deal**, so it is never offered as an alternative —
+it replaces the worse one. Nothing on the list is beaten by anything else on it.
+
+Rows are marked against the plan you are on:
+
+| Mark | Meaning |
+| --- | --- |
+| `this one` | The plan currently on the left |
+| `cheapest` | The worked-out answer for your number — always listed, so there is always a way back to it |
+| `more, for less` (green) | More items than the plan, and no more gold |
+| `12% cheaper each` | Overshoots your number, but at a better price per item — the reason the list exists |
+| `8% dearer each` | Dearer per item than the plan you have picked |
+
+**Click any of them** to make it the plan. **Best mix** puts the `cheapest` one
+back.
+
+By default the list shows the quantities where the price per item actually
+drops — the points worth knowing about, rather than every step between them.
+**Every option** shows the lot.
+
+### The plan is exact, not a rule of thumb
+
+It is worked out rather than guessed: for every quantity from one up to
+everything for sale, the cheapest combination that reaches it. Ties go to the
+larger quantity, which is the same rule as above — same gold, more items, take
+the items.
+
+Very large ranges cost real time to work out, so there is a limit. When the
+range has to be cut it is never cut below the number you asked for, and the
+footer says how far the options list goes.
+
+### Buying it
+
+**Buy** shows what the plan costs before you press it, and asks once for the
+whole total.
+
+WoW only lets an addon buy while you are actually clicking, the same rule that
+makes bidding one press per auction — but a buyout at a price you already
+approved needs no confirmation of its own, so a press takes **everything on the
+current page of results** rather than one auction. In practice that is one or
+two presses for most plans.
+
+It never spends past the total you approved, stops when the gold runs out, and
+after each press reads the house again — every purchase renumbers the list
+behind it, so the page it was walking no longer means what it meant.
+
+Auctions that have gone in the meantime are reported and skipped. What you did
+buy comes off the counts on screen, so the listing table and the plan stay true
+without a second search.
+
+**Hide mine** skips auctions posted by any of your characters. Bid-only auctions
+with no buyout are counted in the summary and otherwise ignored — there is
+nothing there to buy outright.
+
+---
+
 ## Flasks and elixirs
 
-**Craft** costs out every flask and elixir you can make against current reagent
-prices, and says what each one would earn.
+The window has four tabs, top left: **Auctions** is everything above, **Buy** is
+the section before this one, **Sell** posts from your bags, and **Flasks**
+costs out every flask and elixir you can make against current reagent prices, and
+says what each one would earn.
+
+It gets the whole window rather than a panel hanging off the edge, which is what
+makes room for **Sells for** as its own column and for the reagent breakdown to
+sit under the list instead of in a tooltip.
 
 **Setup is opening your alchemy window once.** The client won't say what a
 character can make unless that window is open, so BidSniper reads it the moment
@@ -354,8 +582,8 @@ list.
 The client permits it once every 15 minutes.
 
 **Page by page** asks the server to sort by current bid, cheapest first, and
-stops once bids pass your **Max bid** — everything beyond is too expensive to
-qualify. The lower your Max bid, the shorter the scan.
+walks every page of it. It used to stop once bids passed your **Max bid**; now
+that Max bid is per item it can't — see [Max bid is per item](#max-bid-is-per-item).
 
 **Thorough** pages too, but without sorting and without stopping early: every
 page, every auction. Slower than the rest, and the one to reach for when
@@ -419,8 +647,10 @@ A GetAll scan has no halfway point, so a resumed scan always continues paged.
 
 ## Market and Profit
 
-A huge buyout is not proof an item is worth anything — anyone can list junk at
-100g and the ratio will look wonderful. **Profit** is the honest check.
+**Profit** is Market minus what the row costs you. Since
+[Ratio](#ratio-is-against-what-its-worth) is now measured against the same
+market value, the two agree rather than pulling against each other — Ratio is
+the multiple, Profit is the gold.
 
 Profit shows **`?`** when there's no price on record. That is *not* the same as
 a bad deal, and it's the case to be most careful with: nothing is known about
@@ -521,6 +751,21 @@ always costs less to bid on than to buy, so past that point the answer can't be
 ahead. Looking for a 70g Abyss Crystal no longer pages out through the 800g ones
 to decide it's gone.
 
+### Several copies under one entry
+
+Bidding on eight identical auctions makes eight bids that share one identity, so
+they share one row here — `on 8 of them, 15g in all`.
+
+Being outbid on one of them does not mean losing the lot, and the row says which:
+`3 outbid of 8`. Your Bids tab is asked first because it's first-hand and exact;
+the mail can only ever account for as many refunds as you placed bids, so a
+coincidental refund from somewhere else can't condemn a group you're still
+winning.
+
+You cannot outbid yourself. The server refuses a bid on an auction you already
+lead, and BidSniper skips those rows before it gets that far — so an outbid on
+something you just bid on is somebody else, every time.
+
 An auction is identified by **item, stack size, starting bid and buyout**, every
 one of which is fixed for its whole life. The current bid is deliberately no part
 of that: it moves the instant somebody outbids you, which is exactly the event
@@ -554,6 +799,9 @@ have the next one ready the instant you click. That is what the BID button is.
 | `/snipe scan` | Start a complete new scan |
 | `/snipe resume` | Carry on from where a scan was interrupted |
 | `/snipe auto` \| `paged` \| `getall` \| `thorough` | Choose the scan method |
+| `/snipe buy` | Open the Buy tab |
+| `/snipe buy <item>` | Open it and search for that item straight away |
+| `/snipe buyplan` | Print what the current plan would buy, and for how much |
 | `/snipe mybids` | Open the record of every bid you've placed |
 | `/snipe checkbids` | Fast check: your Bids tab and your mail, no AH queries |
 | `/snipe findbids` | Slow check: search the auction house itself |
@@ -563,6 +811,7 @@ have the next one ready the instant you click. That is what the BID button is.
 | `/snipe syncbids` | Rebuild the "already bid" marks from the server |
 | `/snipe clearmarks` | Drop every "already bid" mark |
 | `/snipe prices` | Forget cached prices and rebuild Profit |
+| `/snipe refresh` | Re-apply the filters, drop ended auctions, rebuild Profit |
 | `/snipe debug` | Scan method, saved results, why GetAll is or isn't used |
 | `/snipe layout` | Print where the filter boxes actually are |
 | `/snipe why <n>` | Say which filter dropped row *n* of the Browse list |
@@ -575,8 +824,13 @@ have the next one ready the instant you click. That is what the BID button is.
 ## Saved data
 
 Everything lives in `BidSniperDB` — settings, wishlist, categories, results,
-resume point, price cache, and the list of your characters. Results persist
-across reloads and relogs, so a scan is never lost to a UI reload.
+resume point, price cache, your recent Buy searches, and the list of your
+characters. Results persist across reloads and relogs, so a scan is never lost
+to a UI reload.
+
+Buy results are the exception: a search is live prices, and stale prices are
+worth nothing, so the listing table is not saved. The searches themselves are,
+under **Recent**.
 
 Two things to know:
 

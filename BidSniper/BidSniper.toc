@@ -9,4 +9,6 @@
 BidSniper.lua
 BidSniperLedger.lua
 BidSniperCraft.lua
+BidSniperSell.lua
+BidSniperBuy.lua
 BidSniperUI.lua

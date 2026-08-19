@@ -6,7 +6,7 @@ local BS = BidSniper
 local format = string.format
 
 local ROW_HEIGHT = 20
-local NUM_ROWS   = 15
+local NUM_ROWS   = 17
 local ROW_WIDTH  = 796
 
 -- column layout: x offset inside a row, width, alignment, sort key
@@ -59,6 +59,24 @@ local function MakeEditBox(parent, x, y, width)
 	eb:SetBackdropBorderColor(0.45, 0.45, 0.45, 1)
 	Font(eb, 11, 1, 1, 1)
 	return eb
+end
+
+--[[
+	Blizzard's dialog background is a half-transparent tile, which over the
+	auction house leaves the rows behind ours showing through the numbers in
+	front. This lays a solid panel over that tile and under everything else.
+
+	Created after SetBackdrop on purpose: within one draw layer the order is the
+	order things were made in, so this sits above the backdrop's own background
+	and below the border and every piece of text. No sublevel argument, which
+	not every build of this client honours.
+]]
+local function Solid(frame, alpha)
+	local t = frame:CreateTexture(nil, "BACKGROUND")
+	t:SetTexture(0.05, 0.05, 0.07, alpha or 0.72)
+	t:SetPoint("TOPLEFT", 11, -12)
+	t:SetPoint("BOTTOMRIGHT", -12, 11)
+	return t
 end
 
 local function Tip(frame, title, body)
@@ -130,7 +148,7 @@ function BS:BuildUI()
 
 	local f = CreateFrame("Frame", "BidSniperFrame", UIParent)
 	f:SetWidth(ROW_WIDTH + 46)
-	f:SetHeight(566)
+	f:SetHeight(628)
 	f:SetFrameStrata("HIGH")
 	f:SetToplevel(true)
 	f:SetBackdrop({
@@ -139,6 +157,7 @@ function BS:BuildUI()
 		tile = true, tileSize = 32, edgeSize = 32,
 		insets = { left = 11, right = 12, top = 12, bottom = 11 },
 	})
+	Solid(f)
 	f:SetMovable(true)
 	f:EnableMouse(true)
 	f:RegisterForDrag("LeftButton")
@@ -161,23 +180,85 @@ function BS:BuildUI()
 	Font(title, 13, 1, 0.82, 0)
 	title:SetPoint("TOP", 0, -14)
 	title:SetText("BidSniper  |cff888888- low bid, high buyout|r")
+	f.title = title
 
 	local close = CreateFrame("Button", nil, f, "UIPanelCloseButton")
 	close:SetPoint("TOPRIGHT", -6, -6)
+
+	--[[
+		Two jobs, two tabs. Sniping wants a wide table of auctions; costing out
+		flasks wants a list and a breakdown under it. Sharing one window meant
+		the crafting side lived in a narrow panel hanging off the edge, which
+		is a poor use of a window that is already 800 pixels wide.
+
+		Plain buttons rather than Blizzard's tab template: that template hangs
+		named textures off its parent, and everything in this file avoids those
+		so a skinning addon has nothing of ours to reach into and resize.
+	]]
+	f.tabs = {}
+	local function MakeTab(key, text, x, width)
+		local t = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+		-- level with the title, which is centred, so the left edge is free
+		t:SetPoint("TOPLEFT", x, -10)
+		t:SetWidth(width)
+		t:SetHeight(20)
+		t:SetText(text)
+		t:SetScript("OnClick", function() BS:SetTab(key) end)
+		t.key = key
+		f.tabs[#f.tabs + 1] = t
+		return t
+	end
+	-- narrower than they were: a fourth tab has to fit between the left edge
+	-- and the centred title, and the title is what gives way last
+	-- Laid out one after another rather than at fixed offsets, so a tab that is
+	-- not built leaves no hole where it would have been.
+	local tabX = 16
+	local function AddTab(key, text, width)
+		MakeTab(key, text, tabX, width)
+		tabX = tabX + width + 4
+	end
+	AddTab("snipe", "Auctions", 74)
+	AddTab("craft", "Flasks", 62)
+	-- Buy and Sell are the same job in two directions, so they sit together.
+	-- No tab when the file behind it is not loaded: a page that can only give
+	-- you errors is worse than a page that is not offered. PLAYER_LOGIN says
+	-- why, once, rather than leaving you to wonder where it went.
+	if self:HasBuy() then AddTab("buy", "Buy", 54) end
+	AddTab("sell", "Sell", 54)
 
 	--------------------------------------------------------------- filters --
 	-- Labels sit ABOVE their control, in fixed columns. Other addons (ElvUI in
 	-- particular) swap the default fonts, so nothing here may depend on how
 	-- wide a piece of text happens to render.
 	local COL      = { 16, 176, 336, 496 }
+	--[[
+		The filter row has columns of its own, packed tighter than the rest.
+
+		Scan AH and Resume share the right-hand end of this row, and Resume sat
+		exactly on top of the Min profit box - the same x, the same width, the
+		same y. Nobody saw it for a while because Resume only appears after a
+		scan has been interrupted, so most of the time there was nothing there
+		to notice.
+
+		The row was never short of space; it was spread thin. Five controls in
+		four 160-pixel columns left gaps of sixty and a hundred pixels between
+		them while the last one ran into the buttons. Twenty-pixel gutters fit
+		all five in the first two thirds and leave the last third to the two
+		buttons, with room to spare between.
+
+		Kept separate from COL because that one also places the second row and
+		the tick boxes, and those have long labels beside them rather than
+		above, so they need the wide columns they have.
+	]]
+	local FCOL     = { 16, 96, 216, 336, 466 }
 	local LABEL_Y  = -38
 	local FIELD_Y  = -56
 	local LABEL2_Y = -84
 	local FIELD2_Y = -102
 	local CHECK_Y  = -134
 
-	local lblRatio = MakeLabel(f, "Min ratio", COL[1], LABEL_Y)
-	local ratioEdit = MakeEditBox(f, COL[1], FIELD_Y, 60)
+	local lblRatio = MakeLabel(f, "Min ratio", FCOL[1], LABEL_Y)
+	local ratioEdit = MakeEditBox(f, FCOL[1], FIELD_Y, 60)
 	ratioEdit:SetMaxLetters(6)
 	ratioEdit.Refresh = function() ratioEdit:SetText(tostring(BS.db.minRatio)) end
 	local function commitRatio()
@@ -194,14 +275,22 @@ function BS:BuildUI()
 	Tip(ratioEdit, "Minimum ratio",
 		"How many times bigger the buyout must be than the bid. 10 means a 1g bid with at least a 10g buyout.")
 
-	local lblMaxBid = MakeLabel(f, "Max bid", COL[2], LABEL_Y)
-	local maxBidEdit = MakeMoneyEdit(f, COL[2], FIELD_Y, 100,
+	local lblMaxBid = MakeLabel(f, "Max bid each", FCOL[2], LABEL_Y)
+	local maxBidEdit = MakeMoneyEdit(f, FCOL[2], FIELD_Y, 100,
 		function() return BS.db.maxBid end,
 		function(v) BS.db.maxBid = v end,
-		"Maximum bid", "Hide anything that costs more than this to bid on. 0 = no limit.")
+		"Maximum bid, per item",
+		"Hide anything that costs more than this to bid on |cffffd100for one of "
+		.. "them|r. 0 = no limit.\n\n"
+		.. "Per item, not per auction: a stack of twenty at a 40g bid is 2g each, and "
+		.. "2g is what you are being asked to pay for one of them. A limit that judged "
+		.. "the 40g would throw away every stack on the house.\n\n"
+		.. "The auction still costs the whole 40g to bid on. The BID button always "
+		.. "shows what one press spends, and a batch asks you to approve the total "
+		.. "before it starts.")
 
-	local lblMinBuy = MakeLabel(f, "Min buyout", COL[3], LABEL_Y)
-	local minBuyEdit = MakeMoneyEdit(f, COL[3], FIELD_Y, 100,
+	local lblMinBuy = MakeLabel(f, "Min buyout", FCOL[3], LABEL_Y)
+	local minBuyEdit = MakeMoneyEdit(f, FCOL[3], FIELD_Y, 100,
 		function() return BS.db.minBuyout end,
 		function(v) BS.db.minBuyout = v end,
 		"Minimum buyout", "Skip cheap junk. An auction must have at least this buyout to show up.")
@@ -218,7 +307,7 @@ function BS:BuildUI()
 		a scan has already run, so filtering results on it would throw away
 		auctions that turn out to be the good ones.
 	]]
-	local PROFIT_X = 616
+	local PROFIT_X = FCOL[5]
 	local lblMinProfit = MakeLabel(f, "Min profit", PROFIT_X, LABEL_Y)
 	local minProfitEdit = MakeMoneyEdit(f, PROFIT_X, FIELD_Y, 96,
 		function() return BS.db.minProfit end,
@@ -233,9 +322,9 @@ function BS:BuildUI()
 		.. "It never hides a row, and never stops you ticking one by hand.")
 
 	-- a plain button rather than a dropdown: predictable size, nothing to skin
-	local lblQuality = MakeLabel(f, "Min quality", COL[4], LABEL_Y)
+	local lblQuality = MakeLabel(f, "Min quality", FCOL[4], LABEL_Y)
 	local qualityBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-	qualityBtn:SetPoint("TOPLEFT", COL[4], FIELD_Y - 1)
+	qualityBtn:SetPoint("TOPLEFT", FCOL[4], FIELD_Y - 1)
 	qualityBtn:SetWidth(110)
 	qualityBtn:SetHeight(20)
 	qualityBtn.Refresh = function() qualityBtn:SetText(QualityText(BS.db.minQuality)) end
@@ -267,12 +356,12 @@ function BS:BuildUI()
 		.. "scans page by page.")
 	f.catBtn = catBtn
 
-	-- This row is packed to the frame edge, so the widths below are chosen to
-	-- add up rather than by eye: 282 + 96 + 124 + 96 + 92 + 100 and the gaps
-	-- between them land the last button 36px inside a 842-wide window.
+	-- Widths on this row are chosen to add up rather than by eye: the last
+	-- button has to land inside an 842-wide window, and the category button
+	-- ahead of them is a fixed 260.
 	local wishBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-	wishBtn:SetPoint("TOPLEFT", 282, FIELD2_Y)
-	wishBtn:SetWidth(96)
+	wishBtn:SetPoint("TOPLEFT", 286, FIELD2_Y)
+	wishBtn:SetWidth(108)
 	wishBtn:SetHeight(22)
 	wishBtn:SetText("Wishlist")
 	wishBtn:SetScript("OnClick", function()
@@ -284,8 +373,8 @@ function BS:BuildUI()
 	f.wishBtn = wishBtn
 
 	local wishScanBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-	wishScanBtn:SetPoint("TOPLEFT", 382, FIELD2_Y)
-	wishScanBtn:SetWidth(124)
+	wishScanBtn:SetPoint("TOPLEFT", 400, FIELD2_Y)
+	wishScanBtn:SetWidth(150)
 	wishScanBtn:SetHeight(22)
 	wishScanBtn:SetText("Scan wishlist")
 	wishScanBtn:SetScript("OnClick", function() BS:StartScan(false, "wishlist") end)
@@ -294,27 +383,11 @@ function BS:BuildUI()
 		.. "filters. Much quicker than a full scan.")
 	f.wishScanBtn = wishScanBtn
 
-	local craftBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-	craftBtn:SetPoint("TOPLEFT", 510, FIELD2_Y)
-	craftBtn:SetWidth(96)
-	craftBtn:SetHeight(22)
-	craftBtn:SetText("Craft")
-	craftBtn:SetScript("OnClick", function()
-		if not BS.craftFrame then return end
-		if BS.craftFrame:IsShown() then BS.craftFrame:Hide() else BS.craftFrame:Show() end
-	end)
-	Tip(craftBtn, "What your flasks and elixirs cost to make",
-		"Costs every flask and elixir you can make against the reagent prices from "
-		.. "your last scan, and says what it would earn.\n\n"
-		.. "The prices come out of a scan you were running anyway - each row is "
-		.. "checked against your reagents on its way past, so this costs no extra "
-		.. "queries and no extra waiting.\n\n"
-		.. "Open your alchemy window once and press Read recipes to fill it in.")
-	f.craftBtn = craftBtn
-
+	-- Craft used to be a button here; it is a tab now, which is what freed the
+	-- room these three get to spread back into.
 	local rebidBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-	rebidBtn:SetPoint("TOPLEFT", 610, FIELD2_Y)
-	rebidBtn:SetWidth(92)
+	rebidBtn:SetPoint("TOPLEFT", 590, FIELD2_Y)
+	rebidBtn:SetWidth(104)
 	rebidBtn:SetHeight(22)
 	rebidBtn:SetText("Re-bid")
 	rebidBtn:SetScript("OnClick", function() BS:RebidOutbid() end)
@@ -326,8 +399,8 @@ function BS:BuildUI()
 	f.rebidBtn = rebidBtn
 
 	local myBidsBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-	myBidsBtn:SetPoint("TOPLEFT", 706, FIELD2_Y)
-	myBidsBtn:SetWidth(100)
+	myBidsBtn:SetPoint("TOPLEFT", 700, FIELD2_Y)
+	myBidsBtn:SetWidth(122)
 	myBidsBtn:SetHeight(22)
 	myBidsBtn:SetText("My bids")
 	myBidsBtn:SetScript("OnClick", function()
@@ -394,7 +467,37 @@ function BS:BuildUI()
 		"Open automatically",
 		"Show this window whenever you open the auction house.")
 
+	--[[
+		Under Scan AH, in the one part of this row nothing else wanted.
+
+		Moving a filter already repaints the table on its own - the filters are
+		a window onto the results rather than something baked into them - so
+		this is for the two things that need saying out loud: prices that have
+		moved since the list was drawn, and auctions that have since ended.
+	]]
+	local refreshBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+	refreshBtn:SetPoint("TOPRIGHT", -18, CHECK_Y - 1)
+	refreshBtn:SetWidth(104)
+	refreshBtn:SetHeight(22)
+	refreshBtn:SetText("Refresh")
+	refreshBtn:SetScript("OnClick", function() BS:RefreshResults() end)
+	Tip(refreshBtn, "Go over the list again",
+		"Re-applies the filters, drops auctions that have certainly ended, and "
+		.. "rebuilds the Profit column from current prices - useful straight after an "
+		.. "Auctionator scan.\n\nIt asks the auction house for nothing, so it costs "
+		.. "nothing.\n\nChanging a filter already repaints the table by itself; you do "
+		.. "not have to press this for that.")
+	f.refreshBtn = refreshBtn
+
 	------------------------------------------------------- column headers --
+	-- a band behind the names, so the header reads as a heading rather than as
+	-- the first row of the table
+	local headBand = f:CreateTexture(nil, "BACKGROUND")
+	headBand:SetTexture(1, 1, 1, 0.06)
+	headBand:SetPoint("TOPLEFT", 16, -166)
+	headBand:SetWidth(ROW_WIDTH)
+	headBand:SetHeight(20)
+
 	local headers = {}
 	for i, col in ipairs(COLS) do
 		local h = CreateFrame("Button", nil, f)
@@ -413,12 +516,19 @@ function BS:BuildUI()
 	end
 	f.headers = headers
 
+	-- bright rule with a dark one beneath: reads as a carved edge at any UI
+	-- scale, where the single faint line it replaces tended to disappear
 	local line = f:CreateTexture(nil, "ARTWORK")
-	line:SetTexture("Interface\\Buttons\\WHITE8X8")
-	line:SetVertexColor(0.5, 0.5, 0.5, 0.5)
+	line:SetTexture(1, 0.82, 0, 0.5)
 	line:SetPoint("TOPLEFT", 16, -186)
 	line:SetWidth(ROW_WIDTH)
-	line:SetHeight(1)
+	line:SetHeight(2)
+
+	local lineShadow = f:CreateTexture(nil, "ARTWORK")
+	lineShadow:SetTexture(0, 0, 0, 0.85)
+	lineShadow:SetPoint("TOPLEFT", 16, -188)
+	lineShadow:SetWidth(ROW_WIDTH)
+	lineShadow:SetHeight(1)
 
 	------------------------------------------------------------ the list --
 	local scroll = CreateFrame("ScrollFrame", "BidSniperScrollFrame", f, "FauxScrollFrameTemplate")
@@ -442,6 +552,16 @@ function BS:BuildUI()
 		end
 		row:RegisterForClicks("LeftButtonUp", "RightButtonUp")
 		row:SetHighlightTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight")
+
+		-- Banding, fixed to the slot rather than to the data. A row keeps its
+		-- place on screen however the list is scrolled, so the pattern stays
+		-- still while the contents move past it; striping by result index would
+		-- make the whole table shimmer on every scroll.
+		if i % 2 == 0 then
+			local stripe = row:CreateTexture(nil, "BACKGROUND")
+			stripe:SetTexture(1, 1, 1, 0.035)
+			stripe:SetAllPoints(row)
+		end
 
 		-- a child CheckButton eats its own clicks, so ticking a row does not
 		-- also fire the row's bid handler
@@ -500,7 +620,10 @@ function BS:BuildUI()
 			local r = self.result
 			if not r then return end
 			if IsShiftKeyDown() and r.link then
-				HandleModifiedItemClick(r.link)
+				-- deliberately a chat link, so the Buy page's shift-click
+				-- shortcut has to know not to treat it as a request to shop
+				if BS.LinkToChat then BS:LinkToChat(r.link)
+				else HandleModifiedItemClick(r.link) end
 			elseif button == "RightButton" then
 				BS:SearchInBrowse(r)
 			else
@@ -546,8 +669,23 @@ function BS:BuildUI()
 				GameTooltip:AddDoubleLine("After 5% AH cut",
 					BS.Money(r.market * 0.95 - r.bid * left), 0.6, 0.6, 0.6)
 			else
-				GameTooltip:AddLine("Auctionator has no price for this item -", 1, 0.5, 0.2)
-				GameTooltip:AddLine("the buyout alone proves nothing.", 1, 0.5, 0.2)
+				GameTooltip:AddLine("Nothing known about what this is worth -", 1, 0.5, 0.2)
+				GameTooltip:AddLine("the buyout alone proves nothing, so the", 1, 0.5, 0.2)
+				GameTooltip:AddLine("ratio is only the seller's asking price.", 1, 0.5, 0.2)
+			end
+
+			-- where the number in the Ratio column came from, since there are
+			-- two possible answers and they mean very different things
+			if r.ratioFrom == "market" then
+				GameTooltip:AddDoubleLine("Ratio: worth over what a bid costs",
+					format("%.1fx", r.ratio or 0), 0.8, 0.8, 0.8, 1, 1, 1)
+				if r.ratioBuyout then
+					GameTooltip:AddDoubleLine("On the seller's buyout instead",
+						format("%.1fx", r.ratioBuyout), 0.6, 0.6, 0.6, 0.6, 0.6, 0.6)
+				end
+			else
+				GameTooltip:AddDoubleLine("Ratio: the seller's buyout over the bid",
+					format("%.1fx", r.ratio or 0), 0.9, 0.6, 0.4, 0.9, 0.6, 0.4)
 			end
 			GameTooltip:AddLine(" ")
 			if BS.Expired(r) then
@@ -653,6 +791,8 @@ function BS:BuildUI()
 	self:BuildCategoryUI(f)
 	self:BuildLedgerUI(f)
 	self:BuildCraftUI(f)
+	self:BuildSellUI(f)
+	if self:HasBuy() then self:BuildBuyUI(f) end
 
 	f.refreshers = { ratioEdit, maxBidEdit, minBuyEdit, minProfitEdit, qualityBtn,
 	                 catBtn, cbNoBids, cbSoon, cbOwn, cbAuto }
@@ -669,7 +809,12 @@ function BS:BuildUI()
 
 	f:SetScript("OnShow", function() BS:RefreshControls() BS:UpdateUI() end)
 
+	-- Must come before anything that reads self.frame, which SetTab does: it
+	-- bails out when there is no window yet, so calling it any earlier in here
+	-- left both tabs looking unselected until the first one was clicked.
 	self.frame = f
+
+	self:SetTab("snipe")		-- the window opens on the auctions
 	self:RefreshControls()
 	self:SetStatus("Open the auction house and press Scan AH.")
 end
@@ -693,6 +838,7 @@ function BS:BuildCategoryUI(parent)
 		tile = true, tileSize = 32, edgeSize = 32,
 		insets = { left = 11, right = 12, top = 12, bottom = 11 },
 	})
+	Solid(c)
 	c:EnableMouse(true)
 	c:Hide()
 
@@ -700,7 +846,7 @@ function BS:BuildCategoryUI(parent)
 	c:SetScript("OnShow", function()
 		if BS.wishFrame   then BS.wishFrame:Hide()   end
 		if BS.ledgerFrame then BS.ledgerFrame:Hide() end
-		if BS.craftFrame  then BS.craftFrame:Hide()  end
+		BS:SetTab("snipe")		-- side panels belong to the auction page
 		BS:RefreshCategories()
 	end)
 
@@ -928,12 +1074,13 @@ function BS:BuildWishlistUI(parent)
 		tile = true, tileSize = 32, edgeSize = 32,
 		insets = { left = 11, right = 12, top = 12, bottom = 11 },
 	})
+	Solid(w)
 	w:EnableMouse(true)
 	w:Hide()
 	w:SetScript("OnShow", function()
 		if BS.catFrame    then BS.catFrame:Hide()    end
 		if BS.ledgerFrame then BS.ledgerFrame:Hide() end
-		if BS.craftFrame  then BS.craftFrame:Hide()  end
+		BS:SetTab("snipe")		-- side panels belong to the auction page
 		BS:RefreshWishlist()
 	end)
 
@@ -1075,12 +1222,13 @@ function BS:BuildLedgerUI(parent)
 		tile = true, tileSize = 32, edgeSize = 32,
 		insets = { left = 11, right = 12, top = 12, bottom = 11 },
 	})
+	Solid(g)
 	g:EnableMouse(true)
 	g:Hide()
 	g:SetScript("OnShow", function()
 		if BS.catFrame  then BS.catFrame:Hide()  end
 		if BS.wishFrame then BS.wishFrame:Hide() end
-		if BS.craftFrame then BS.craftFrame:Hide() end
+		BS:SetTab("snipe")		-- side panels belong to the auction page
 		BS:RefreshLedger()
 	end)
 
@@ -1174,6 +1322,15 @@ function BS:BuildLedgerUI(parent)
 				GameTooltip:AddDoubleLine("Identical auctions bid on",
 					format("%d  (%s in all)", e.copies, BS.Money(e.myBid * e.copies)),
 					0.7, 0.7, 0.7, 1, 0.82, 0)
+				if (e.outCount or 0) > 0 or (e.leadCount or 0) > 0 then
+					GameTooltip:AddDoubleLine("Still leading / outbid",
+						format("%d / %d", e.leadCount or 0, e.outCount or 0),
+						0.7, 0.7, 0.7, 0.2, 1, 0.2)
+					GameTooltip:AddLine("You cannot outbid yourself - the server refuses "
+						.. "a bid on an auction you already lead, and these are separate "
+						.. "auctions. Somebody else took the ones marked outbid.",
+						0.6, 0.6, 0.6, true)
+				end
 			end
 			if e.placed then
 				GameTooltip:AddDoubleLine("Bid placed", BS.Ago(e.placed), 0.7, 0.7, 0.7, 1, 1, 1)
@@ -1241,13 +1398,13 @@ end
 --  what your flasks and elixirs cost to make
 --=============================================================================
 
-local CRAFT_ROWS  = 11
-local CRAFT_ROW_H = 22
-local DETAIL_ROWS = 7
-local DETAIL_ROW_H = 15
+local CRAFT_ROWS   = 13
+local CRAFT_ROW_H  = 22
+local DETAIL_ROWS  = 8
+local DETAIL_ROW_H = 16
 
 --[[
-	The panel answers two questions that want different shapes.
+	The page answers two questions that want different shapes.
 
 	"Which of these is worth making?" is a sorted list, and it is the top half.
 
@@ -1255,26 +1412,50 @@ local DETAIL_ROW_H = 15
 	half - either the reagents of whichever recipe you clicked, or, once you
 	have typed quantities against a few of them, the whole shopping list with
 	your bags already deducted.
+
+	It fills the window rather than hanging off the side of it, which is what
+	lets both halves be read at a glance instead of through a slot.
 ]]
 function BS:BuildCraftUI(parent)
 	local g = CreateFrame("Frame", "BidSniperCraftFrame", parent)
-	g:SetWidth(540)
-	g:SetHeight(560)
-	g:SetPoint("TOPLEFT", parent, "TOPRIGHT", 4, 0)
-	g:SetFrameStrata("HIGH")
-	g:SetToplevel(true)
-	g:SetBackdrop({
-		bgFile   = "Interface\\DialogFrame\\UI-DialogBox-Background",
-		edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
-		tile = true, tileSize = 32, edgeSize = 32,
-		insets = { left = 11, right = 12, top = 12, bottom = 11 },
-	})
+	g:SetPoint("TOPLEFT", parent, "TOPLEFT", 10, -34)
+	g:SetPoint("BOTTOMRIGHT", parent, "BOTTOMRIGHT", -11, 10)
 	g:EnableMouse(true)
+	-- nothing under a covered page should answer the wheel either
+	g:SetScript("OnMouseWheel", function() end)
+	g:EnableMouseWheel(true)
 	g:Hide()
+
+	--[[
+		A page, not a sheet laid over one.
+
+		This stands exactly where the auction table stands, so any trace of that
+		table coming through reads as a fault rather than as depth - the two tabs
+		are meant to feel like separate pages of one window, and neither may ever
+		be a ghost behind the other. So: no transparency at all, and an edge of
+		its own so the surface has a boundary rather than merely a colour.
+
+		The frame level is not set here. The window is SetToplevel, which moves it
+		as you click between it and other windows, and a level worked out once at
+		build time can end up beneath children that moved with it. SetTab settles
+		it against the parent every time the page comes up.
+	]]
+	g:SetBackdrop({
+		bgFile   = "Interface\\Buttons\\WHITE8X8",
+		edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+		tile = false, edgeSize = 14,
+		insets = { left = 3, right = 3, top = 3, bottom = 3 },
+	})
+	g:SetBackdropColor(0.05, 0.05, 0.07, 1)
+	g:SetBackdropBorderColor(0.35, 0.32, 0.25, 1)
+
+	-- Belt and braces over the backdrop: a solid fill corner to corner, so the
+	-- inset ring the border draws its edge into cannot show anything through.
+	local sheet = g:CreateTexture(nil, "BACKGROUND")
+	sheet:SetTexture(0.05, 0.05, 0.07, 1)
+	sheet:SetAllPoints(g)
+
 	g:SetScript("OnShow", function()
-		if BS.catFrame    then BS.catFrame:Hide()    end
-		if BS.wishFrame   then BS.wishFrame:Hide()   end
-		if BS.ledgerFrame then BS.ledgerFrame:Hide() end
 		-- opening it is a request for the current answer, and both Auctionator's
 		-- database and your bags may have moved since it was last up
 		BS.craftCosted = nil
@@ -1283,36 +1464,44 @@ function BS:BuildCraftUI(parent)
 
 	local title = g:CreateFontString(nil, "ARTWORK")
 	Font(title, 12, 1, 0.82, 0)
-	title:SetPoint("TOP", 0, -14)
+	title:SetPoint("TOPLEFT", 18, -8)
 	title:SetText("Flasks and elixirs")
-
-	local close = CreateFrame("Button", nil, g, "UIPanelCloseButton")
-	close:SetPoint("TOPRIGHT", -6, -6)
 
 	local help = g:CreateFontString(nil, "ARTWORK")
 	Font(help, 10, 0.6, 0.6, 0.6)
-	help:SetPoint("TOPLEFT", 18, -36)
-	help:SetWidth(500)
+	help:SetPoint("TOPLEFT", 18, -28)
+	help:SetWidth(780)
 	help:SetJustifyH("LEFT")
 	help:SetText("Priced from the last scan, at no extra cost. Orange means an estimate. "
 		.. "Click a row for its reagents; type how many you want to make and the "
 		.. "shopping list works out the rest.")
 
-	local heads = { { "Recipe", 2, 150, "LEFT" }, { "Can make", 156, 56, "RIGHT" },
-	                { "Want", 218, 40, "CENTER" }, { "Reagents", 264, 78, "RIGHT" },
-	                { "Profit", 346, 86, "RIGHT" } }
+	-- a band behind the headers, so the column names read as a heading rather
+	-- than as the first row of the list
+	local band = g:CreateTexture(nil, "BACKGROUND")
+	band:SetTexture(1, 1, 1, 0.06)
+	band:SetPoint("TOPLEFT", 14, -48)
+	band:SetWidth(788)
+	band:SetHeight(20)
+
+	-- With the whole window to work in, Sells for gets its own column instead
+	-- of living in a tooltip.
+	local heads = { { "Recipe", 2, 208, "LEFT" }, { "Can make", 214, 58, "RIGHT" },
+	                { "On AH", 276, 52, "RIGHT" }, { "Want", 334, 44, "CENTER" },
+	                { "Reagents", 384, 104, "RIGHT" }, { "Sells for", 494, 104, "RIGHT" },
+	                { "Profit", 604, 112, "RIGHT" } }
 	for _, h in ipairs(heads) do
 		local fs = g:CreateFontString(nil, "ARTWORK")
 		Font(fs, 10, 0.8, 0.8, 0.8)
-		fs:SetPoint("TOPLEFT", 18 + h[2], -78)
+		fs:SetPoint("TOPLEFT", 18 + h[2], -52)
 		fs:SetWidth(h[3])
 		fs:SetJustifyH(h[4])
 		fs:SetText(h[1])
 	end
 
 	local scroll = CreateFrame("ScrollFrame", "BidSniperCraftScroll", g, "FauxScrollFrameTemplate")
-	scroll:SetPoint("TOPLEFT", 18, -92)
-	scroll:SetWidth(462)
+	scroll:SetPoint("TOPLEFT", 18, -66)
+	scroll:SetWidth(756)
 	scroll:SetHeight(CRAFT_ROWS * CRAFT_ROW_H)
 	scroll:SetScript("OnVerticalScroll", function(self, offset)
 		FauxScrollFrame_OnVerticalScroll(self, offset, CRAFT_ROW_H, function() BS:RefreshCraft() end)
@@ -1322,7 +1511,7 @@ function BS:BuildCraftUI(parent)
 	g.rows = {}
 	for i = 1, CRAFT_ROWS do
 		local row = CreateFrame("Button", nil, g)
-		row:SetWidth(440)
+		row:SetWidth(740)
 		row:SetHeight(CRAFT_ROW_H)
 		if i == 1 then
 			row:SetPoint("TOPLEFT", scroll, "TOPLEFT", 0, 0)
@@ -1331,9 +1520,30 @@ function BS:BuildCraftUI(parent)
 		end
 		row:SetHighlightTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight")
 
+		--[[
+			Banding, set once at build rather than per paint. A row sits at a
+			fixed place on screen whatever the list is scrolled to, so tying the
+			stripe to the slot keeps the pattern still while the contents move -
+			which is the point of it. Tying it to the data would make the whole
+			list shimmer on every scroll.
+		]]
+		if i % 2 == 0 then
+			local stripe = row:CreateTexture(nil, "BACKGROUND")
+			stripe:SetTexture(1, 1, 1, 0.035)
+			stripe:SetAllPoints(row)
+		end
+
+		-- the recipe whose reagents are showing below, marked properly rather
+		-- than with an arrow glued to the front of its name
+		row.pick = row:CreateTexture(nil, "BORDER")
+		row.pick:SetTexture(1, 0.82, 0, 0.14)
+		row.pick:SetAllPoints(row)
+		row.pick:Hide()
+
 		row.cells = {}
-		local layout = { { 2, 150, "LEFT" }, { 156, 56, "RIGHT" },
-		                 { 264, 78, "RIGHT" }, { 346, 86, "RIGHT" } }
+		local layout = { { 2, 208, "LEFT" }, { 214, 58, "RIGHT" },
+		                 { 276, 52, "RIGHT" }, { 384, 104, "RIGHT" },
+		                 { 494, 104, "RIGHT" }, { 604, 112, "RIGHT" } }
 		for c, l in ipairs(layout) do
 			local fs = row:CreateFontString(nil, "ARTWORK")
 			Font(fs, 11, 1, 1, 1)
@@ -1359,8 +1569,8 @@ function BS:BuildCraftUI(parent)
 			you type means there is never anything pending to misplace.
 		]]
 		local want = CreateFrame("EditBox", nil, row)
-		want:SetPoint("LEFT", 218, 0)
-		want:SetWidth(40)
+		want:SetPoint("LEFT", 334, 0)
+		want:SetWidth(44)
 		want:SetHeight(18)
 		want:SetAutoFocus(false)
 		want:SetNumeric(true)
@@ -1442,6 +1652,15 @@ function BS:BuildCraftUI(parent)
 			end
 			GameTooltip:AddDoubleLine("From what is in your bags",
 				format("%d", c.canMake or 0), 0.8, 0.8, 0.8, 1, 0.82, 0)
+			if c.onAuction ~= nil then
+				GameTooltip:AddDoubleLine("Already listed on the AH",
+					format("%d", c.onAuction), 0.8, 0.8, 0.8,
+					(c.onAuction == 0) and 1 or 1, (c.onAuction == 0) and 0.6 or 1,
+					(c.onAuction == 0) and 0.2 or 1)
+			else
+				GameTooltip:AddLine("The auction house has not sent your own listings yet.",
+					0.6, 0.6, 0.6, true)
+			end
 
 			if not c.exact then
 				GameTooltip:AddLine(" ")
@@ -1462,24 +1681,47 @@ function BS:BuildCraftUI(parent)
 	end
 
 	------------------------------------------------------------- breakdown --
-	local divider = g:CreateTexture(nil, "ARTWORK")
-	divider:SetTexture("Interface\\Tooltips\\UI-Tooltip-Border")
-	divider:SetPoint("TOPLEFT", 18, -92 - CRAFT_ROWS * CRAFT_ROW_H - 6)
-	divider:SetWidth(500)
-	divider:SetHeight(2)
-	divider:SetVertexColor(0.4, 0.4, 0.4, 0.8)
+	-- everything below hangs off where the list ends, so the row count above is
+	-- the only number to change if this is ever re-proportioned
+	local BELOW = -66 - CRAFT_ROWS * CRAFT_ROW_H
+
+	--[[
+		The seam between "which of these is worth making" and "so what do I go
+		and buy" carries real weight, so it gets drawn rather than implied.
+
+		A single faint line vanished into the background at most UI scales. A
+		bright rule with a dark one directly beneath it reads as a carved edge
+		instead, and the panel below picks the section out on its own.
+	]]
+	local pane = g:CreateTexture(nil, "BACKGROUND")
+	pane:SetTexture(1, 1, 1, 0.045)
+	pane:SetPoint("TOPLEFT", 14, BELOW - 14)
+	pane:SetWidth(788)
+	pane:SetHeight(40 + DETAIL_ROWS * DETAIL_ROW_H)
+
+	local rule = g:CreateTexture(nil, "ARTWORK")
+	rule:SetTexture(1, 0.82, 0, 0.5)
+	rule:SetPoint("TOPLEFT", 14, BELOW - 6)
+	rule:SetWidth(788)
+	rule:SetHeight(2)
+
+	local ruleShadow = g:CreateTexture(nil, "ARTWORK")
+	ruleShadow:SetTexture(0, 0, 0, 0.85)
+	ruleShadow:SetPoint("TOPLEFT", 14, BELOW - 8)
+	ruleShadow:SetWidth(788)
+	ruleShadow:SetHeight(1)
 
 	local detailTitle = g:CreateFontString(nil, "ARTWORK")
 	Font(detailTitle, 11, 1, 0.82, 0)
-	detailTitle:SetPoint("TOPLEFT", 18, -92 - CRAFT_ROWS * CRAFT_ROW_H - 14)
-	detailTitle:SetWidth(500)
+	detailTitle:SetPoint("TOPLEFT", 18, BELOW - 18)
+	detailTitle:SetWidth(780)
 	detailTitle:SetJustifyH("LEFT")
 	g.detailTitle = detailTitle
 
 	local detailScroll = CreateFrame("ScrollFrame", "BidSniperCraftDetailScroll", g,
 		"FauxScrollFrameTemplate")
-	detailScroll:SetPoint("TOPLEFT", 18, -92 - CRAFT_ROWS * CRAFT_ROW_H - 30)
-	detailScroll:SetWidth(462)
+	detailScroll:SetPoint("TOPLEFT", 18, BELOW - 36)
+	detailScroll:SetWidth(756)
 	detailScroll:SetHeight(DETAIL_ROWS * DETAIL_ROW_H)
 	detailScroll:SetScript("OnVerticalScroll", function(self, offset)
 		FauxScrollFrame_OnVerticalScroll(self, offset, DETAIL_ROW_H, function() BS:RefreshCraft() end)
@@ -1491,15 +1733,15 @@ function BS:BuildCraftUI(parent)
 		local fs = g:CreateFontString(nil, "ARTWORK")
 		Font(fs, 10, 0.9, 0.9, 0.9)
 		fs:SetPoint("TOPLEFT", detailScroll, "TOPLEFT", 0, -(i - 1) * DETAIL_ROW_H)
-		fs:SetWidth(462)
+		fs:SetWidth(756)
 		fs:SetJustifyH("LEFT")
 		g.detailRows[i] = fs
 	end
 
 	local detailFoot = g:CreateFontString(nil, "ARTWORK")
 	Font(detailFoot, 10, 0.7, 0.7, 0.7)
-	detailFoot:SetPoint("TOPLEFT", 18, -92 - CRAFT_ROWS * CRAFT_ROW_H - 34 - DETAIL_ROWS * DETAIL_ROW_H)
-	detailFoot:SetWidth(500)
+	detailFoot:SetPoint("TOPLEFT", 18, BELOW - 36 - DETAIL_ROWS * DETAIL_ROW_H)
+	detailFoot:SetWidth(780)
 	detailFoot:SetJustifyH("LEFT")
 	g.detailFoot = detailFoot
 
@@ -1719,17 +1961,33 @@ function BS:RefreshCraft()
 
 			local colour = c.exact and "|cffffffff" or "|cffff8800"
 			local picked = (self.craftView == "recipe" and self.craftPick == c.name)
-			row.cells[1]:SetText((picked and "|cffffd100> |r" or "") .. colour .. c.name .. "|r")
+			if picked then row.pick:Show() else row.pick:Hide() end
+			row.cells[1]:SetText(colour .. c.name .. "|r")
 			row.cells[2]:SetText((c.canMake or 0) > 0
 				and ("|cff00ff00" .. c.canMake .. "|r") or "|cff6666660|r")
-			row.cells[3]:SetText(BS.Money(c.cost))
+
+			--[[
+				Nothing listed is the thing worth noticing, so it is the thing
+				that gets a colour. A dash means the auction house has not told
+				us yet, which is not the same as none and must not read like it.
+			]]
+			if c.onAuction == nil then
+				row.cells[3]:SetText("|cff666666-|r")
+			elseif c.onAuction == 0 then
+				row.cells[3]:SetText("|cffff88000|r")
+			else
+				row.cells[3]:SetText("|cffffffff" .. c.onAuction .. "|r")
+			end
+
+			row.cells[4]:SetText(BS.Money(c.cost))
+			row.cells[5]:SetText(c.revenue and BS.Money(c.revenue) or "|cff666666-|r")
 
 			if c.profit then
-				row.cells[4]:SetText(c.profit >= 0
+				row.cells[6]:SetText(c.profit >= 0
 					and ("|cff00ff00+" .. BS.MoneyPlain(c.profit) .. "|r")
 					or  ("|cffff4444-" .. BS.MoneyPlain(-c.profit) .. "|r"))
 			else
-				row.cells[4]:SetText("|cff666666?|r")
+				row.cells[6]:SetText("|cff666666?|r")
 			end
 
 			--[[
@@ -1752,6 +2010,7 @@ function BS:RefreshCraft()
 		else
 			row.costed = nil
 			row.want.owner = nil
+			row.pick:Hide()
 			SetWantText(row.want, nil)
 			row.want:Hide()
 			row:Hide()
@@ -1796,12 +2055,1264 @@ function BS:RefreshCraft()
 	end
 end
 
+--[[
+	Switching pages.
+
+	The crafting page is a frame filling the window on top of the auction side
+	rather than a replacement for it, which keeps every widget exactly where it
+	was built and means nothing has to be reparented or re-anchored. It is
+	opaque, it takes the mouse, and it swallows the wheel, so what is underneath
+	is neither visible nor reachable while it is up.
+]]
+function BS:SetTab(which)
+	if not self.frame then return end
+	self.tab = which
+
+	local sp = self.sellFrame
+	if sp then
+		if which == "sell" then
+			sp:SetFrameLevel(self.frame:GetFrameLevel() + 20)
+			sp:Show()
+		else
+			sp:Hide()
+		end
+	end
+
+	local bp = self.buyFrame
+	if bp then
+		if which == "buy" then
+			bp:SetFrameLevel(self.frame:GetFrameLevel() + 20)
+			bp:Show()
+		else
+			-- the recent list is a child that floats over the page, so leaving
+			-- the page has to take it with us
+			if bp.recent then bp.recent:Hide() end
+			bp:Hide()
+		end
+	end
+
+	local g = self.craftFrame
+	if g then
+		if which == "craft" then
+			-- Settled on the way up rather than at build time. The window is
+			-- SetToplevel, so its level moves as you click between it and other
+			-- windows, and a number worked out once can end up underneath the
+			-- very children it was meant to cover.
+			g:SetFrameLevel(self.frame:GetFrameLevel() + 20)
+			g:Show()
+		else
+			g:Hide()
+		end
+	end
+
+	-- the side panels belong to the auction page and have nowhere to sit on
+	-- the other ones
+	if which ~= "snipe" then
+		if self.catFrame    then self.catFrame:Hide()    end
+		if self.wishFrame   then self.wishFrame:Hide()   end
+		if self.ledgerFrame then self.ledgerFrame:Hide() end
+	end
+
+	for _, t in ipairs(self.frame.tabs or {}) do
+		if t.key == which then
+			t:Disable()		-- the page you are on is not a place to go
+		else
+			t:Enable()
+		end
+	end
+
+	self:UpdateUI()
+end
+
 function BS:ShowCraft()
 	if not self.frame then return end
 	self.frame:Show()
-	local g = self.craftFrame
-	if not g then return end
-	if g:IsShown() then g:Hide() else g:Show() end
+	if self.tab == "craft" then self:SetTab("snipe") else self:SetTab("craft") end
+end
+
+--=============================================================================
+--  buying: the listings, the plan, and the other ways to buy it
+--=============================================================================
+
+local BUY_ROWS   = 9
+local BUY_ROW_H  = 20
+local PLAN_ROWS  = 7
+local PLAN_ROW_H = 19
+
+--[[
+	Three lists, and each answers a different question.
+
+	The top one is every listing, cheapest per item first. That is the whole of
+	Auctionator's buy tab, and for "I want the cheap one" it is still the right
+	answer, so it is the biggest thing on the page and you can buy straight off
+	it.
+
+	Bottom left is the plan: which auctions, and how many of each, add up to the
+	number you asked for. Bottom right is what else that number could have been.
+	They sit side by side because they are read against each other - the point
+	of the right-hand list is the moment one of its lines is plainly better than
+	the plan on the left, and that comparison should not need scrolling.
+]]
+function BS:BuildBuyUI(parent)
+	local g = CreateFrame("Frame", "BidSniperBuyFrame", parent)
+	g:SetPoint("TOPLEFT", parent, "TOPLEFT", 10, -34)
+	g:SetPoint("BOTTOMRIGHT", parent, "BOTTOMRIGHT", -11, 10)
+	g:EnableMouse(true)
+	g:SetScript("OnMouseWheel", function() end)
+	g:EnableMouseWheel(true)
+	g:Hide()
+
+	-- opaque, exactly as the other pages are, so nothing of the auction table
+	-- can read as a ghost behind this one
+	g:SetBackdrop({
+		bgFile   = "Interface\\Buttons\\WHITE8X8",
+		edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+		tile = false, edgeSize = 14,
+		insets = { left = 3, right = 3, top = 3, bottom = 3 },
+	})
+	g:SetBackdropColor(0.05, 0.05, 0.07, 1)
+	g:SetBackdropBorderColor(0.35, 0.32, 0.25, 1)
+
+	local sheet = g:CreateTexture(nil, "BACKGROUND")
+	sheet:SetTexture(0.05, 0.05, 0.07, 1)
+	sheet:SetAllPoints(g)
+
+	g:SetScript("OnShow", function() BS:RefreshBuy() end)
+
+	local title = g:CreateFontString(nil, "ARTWORK")
+	Font(title, 12, 1, 0.82, 0)
+	title:SetPoint("TOPLEFT", 18, -8)
+	title:SetText("Buy")
+
+	local help = g:CreateFontString(nil, "ARTWORK")
+	Font(help, 10, 0.6, 0.6, 0.6)
+	help:SetPoint("TOPLEFT", 18, -26)
+	help:SetWidth(780)
+	help:SetJustifyH("LEFT")
+	help:SetText("Search an item and buy the cheapest per item, or say how many you "
+		.. "want and let it work out which auctions together cost least. More items "
+		.. "for the same gold or less always wins, so the other quantities worth "
+		.. "having are listed beside the plan.")
+
+	--------------------------------------------------------------- search --
+	MakeLabel(g, "Item", 18, -62)
+	local search = MakeEditBox(g, 18, -76, 240)
+	search:SetMaxLetters(64)
+	local function doSearch()
+		search:ClearFocus()
+		if g.recent then g.recent:Hide() end
+		BS:BuyStartSearch(search:GetText())
+	end
+	search:SetScript("OnEnterPressed", doSearch)
+	search:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
+	Tip(search, "What to look for",
+		"Type a name or paste an item link. Case does not matter.\n\n"
+		.. "The auction house matches on part of a name, but only the whole name is "
+		.. "listed here - searching for Copper Bar will not fill the page with Copper "
+		.. "Bar Racks. Type half a name and it says what it found instead.")
+	g.search = search
+
+	local searchBtn = CreateFrame("Button", nil, g, "UIPanelButtonTemplate")
+	searchBtn:SetPoint("TOPLEFT", 266, -77)
+	searchBtn:SetWidth(76)
+	searchBtn:SetHeight(20)
+	searchBtn:SetText("Search")
+	searchBtn:SetScript("OnClick", doSearch)
+	g.searchBtn = searchBtn
+
+	local recentBtn = CreateFrame("Button", nil, g, "UIPanelButtonTemplate")
+	recentBtn:SetPoint("TOPLEFT", 348, -77)
+	recentBtn:SetWidth(72)
+	recentBtn:SetHeight(20)
+	recentBtn:SetText("Recent")
+	Tip(recentBtn, "What you looked at last",
+		"The last dozen searches, newest first. Click one to run it again.")
+
+	--[[
+		A list of my own rather than a dropdown. Blizzard's dropdown hangs
+		named frames off whatever it is given as a parent, which is the one
+		thing every widget in this file goes out of its way not to do, and a
+		list of names in a box is not worth the exception.
+	]]
+	local recent = CreateFrame("Frame", nil, g)
+	recent:SetPoint("TOPLEFT", 348, -98)
+	recent:SetWidth(220)
+	recent:SetHeight(20)		-- grows to the number of entries when it opens
+	recent:SetBackdrop({
+		bgFile   = "Interface\\ChatFrame\\ChatFrameBackground",
+		edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+		tile = true, tileSize = 16, edgeSize = 12,
+		insets = { left = 3, right = 3, top = 3, bottom = 3 },
+	})
+	recent:SetBackdropColor(0.04, 0.04, 0.06, 0.98)
+	recent:SetBackdropBorderColor(0.45, 0.45, 0.45, 1)
+	recent:EnableMouse(true)
+	recent:Hide()
+	recent.rows = {}
+	for i = 1, 12 do
+		local b = CreateFrame("Button", nil, recent)
+		b:SetPoint("TOPLEFT", 6, -4 - (i - 1) * 16)
+		b:SetWidth(208)
+		b:SetHeight(16)
+		b:SetHighlightTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight")
+		local fs = b:CreateFontString(nil, "ARTWORK")
+		Font(fs, 11, 0.9, 0.9, 0.9)
+		fs:SetPoint("LEFT", 2, 0)
+		fs:SetWidth(204)
+		fs:SetJustifyH("LEFT")
+		b.text = fs
+		b:SetScript("OnClick", function(self)
+			if not self.name then return end
+			recent:Hide()
+			search:SetText(self.name)
+			BS:BuyStartSearch(self.name)
+		end)
+		b:Hide()
+		recent.rows[i] = b
+	end
+	g.recent = recent
+
+	recentBtn:SetScript("OnClick", function()
+		if recent:IsShown() then recent:Hide() return end
+		-- settled on the way up, as the pages themselves are: the window is
+		-- SetToplevel, so a level worked out at build time drifts
+		recent:SetFrameLevel(g:GetFrameLevel() + 10)
+		local list = BS:BuySettings().recent
+		if #list == 0 then
+			BS:Print("Nothing searched for yet.")
+			return
+		end
+		for i, b in ipairs(recent.rows) do
+			if list[i] then
+				b.name = list[i]
+				b.text:SetText(list[i])
+				b:Show()
+			else
+				b.name = nil
+				b:Hide()
+			end
+		end
+		recent:SetHeight(8 + math.min(#list, 12) * 16)
+		recent:Show()
+	end)
+
+	MakeLabel(g, "How many", 430, -62)
+	local qty = MakeEditBox(g, 430, -76, 62)
+	qty:SetNumeric(true)
+	qty:SetMaxLetters(5)
+	qty:SetJustifyH("CENTER")
+	--[[
+		Committed on every keystroke, so the plan answers as you type. The table
+		behind it is worked out once per search rather than once per keystroke -
+		it does not depend on the number you want, only on what is for sale - so
+		typing a figure costs a lookup, not a recalculation.
+	]]
+	qty.Refresh = function()
+		if qty:HasFocus() then return end
+		qty.painting = true
+		qty:SetText(tostring(BS:BuySettings().qty or 1))
+		qty.painting = nil
+	end
+	local function commitQty()
+		if qty.painting then return end
+		local n = tonumber(qty:GetText()) or 0
+		BS:BuySettings().qty = math.max(1, math.min(9999, n))
+		BS:BuyReplan()
+		BS:RefreshBuy()
+	end
+	qty:SetScript("OnTextChanged", commitQty)
+	qty:SetScript("OnEnterPressed", function(self) self:ClearFocus() end)
+	qty:SetScript("OnEditFocusLost", commitQty)
+	qty:SetScript("OnEscapePressed", function(self) qty.Refresh() self:ClearFocus() end)
+	Tip(qty, "How many you want",
+		"The plan below is the cheapest set of auctions that gets you at least this "
+		.. "many. Leave it at 1 and it simply finds the cheapest single purchase.")
+	g.qty = qty
+
+	local bestBtn = CreateFrame("Button", nil, g, "UIPanelButtonTemplate")
+	bestBtn:SetPoint("TOPLEFT", 502, -77)
+	bestBtn:SetWidth(108)
+	bestBtn:SetHeight(20)
+	bestBtn:SetText("Best mix")
+	bestBtn:SetScript("OnClick", function() BS:BuyReplan() BS:RefreshBuy() end)
+	Tip(bestBtn, "Back to the worked-out plan",
+		"Clicking a listing or one of the other quantities replaces the plan with "
+		.. "that choice. This puts the cheapest way of reaching your number back.")
+
+	local cbMine = MakeCheck(g, "Hide mine", 618, -62,
+		function() return BS:BuySettings().hideOwn end,
+		function(v)
+			BS:BuySettings().hideOwn = v
+			if BS.buy then BS:Print("Search again to apply that to the list.") end
+		end,
+		"Skip your own auctions",
+		"Auctions posted by any of your characters. Buying your own back costs you "
+		.. "the cut and gains you nothing.\n\nTakes effect on the next search.")
+
+	local cbAll = MakeCheck(g, "Every option", 618, -84,
+		function() return BS:BuySettings().allOptions end,
+		function(v) BS:BuySettings().allOptions = v BS:RefreshBuy() end,
+		"Show every quantity",
+		"Off, the list on the right shows the quantities where the price per item "
+		.. "actually drops - the points worth knowing about. On, it shows every "
+		.. "quantity that is not beaten by a bigger one, which is a much longer "
+		.. "list saying much the same thing.")
+
+	local cbShift = MakeCheck(g, "Shift-click search", 618, -106,
+		function() return BS:BuySettings().shiftSearch end,
+		function(v) BS:BuySettings().shiftSearch = v end,
+		"Shift-click an item to look it up",
+		"Shift-click an item anywhere - your bags, a chat link, a loot window - and "
+		.. "this page opens on it and searches, whichever tab you were on.\n\n"
+		.. "It stays out of the way where shift-click already means something: away "
+		.. "from the auction house, while you are typing in chat, and on rows that "
+		.. "link an item into chat on purpose.")
+
+	local summary = g:CreateFontString(nil, "ARTWORK")
+	Font(summary, 11, 1, 1, 1)
+	summary:SetPoint("TOPLEFT", 18, -106)
+	-- stops short of the tick box on its right
+	summary:SetWidth(590)
+	summary:SetJustifyH("LEFT")
+	g.summary = summary
+
+	------------------------------------------------------- the listings --
+	local band = g:CreateTexture(nil, "BACKGROUND")
+	band:SetTexture(1, 1, 1, 0.06)
+	band:SetPoint("TOPLEFT", 14, -126)
+	band:SetWidth(788)
+	band:SetHeight(20)
+
+	local LIST_COLS = {
+		{ "Per item", 2,   100, "RIGHT"  },
+		{ "Stack",    106, 44,  "RIGHT"  },
+		{ "Up",       154, 60,  "RIGHT"  },
+		{ "Each",     218, 104, "RIGHT"  },
+		{ "All of it",326, 110, "RIGHT"  },
+		{ "Seller",   440, 120, "LEFT"   },
+		{ "Left",     564, 44,  "CENTER" },
+		{ "In plan",  612, 124, "RIGHT"  },
+	}
+	for _, h in ipairs(LIST_COLS) do
+		local fs = g:CreateFontString(nil, "ARTWORK")
+		Font(fs, 10, 0.8, 0.8, 0.8)
+		fs:SetPoint("TOPLEFT", 18 + h[2], -130)
+		fs:SetWidth(h[3])
+		fs:SetJustifyH(h[4])
+		fs:SetText(h[1])
+	end
+
+	local scroll = CreateFrame("ScrollFrame", "BidSniperBuyScroll", g, "FauxScrollFrameTemplate")
+	scroll:SetPoint("TOPLEFT", 18, -148)
+	scroll:SetWidth(756)
+	scroll:SetHeight(BUY_ROWS * BUY_ROW_H)
+	scroll:SetScript("OnVerticalScroll", function(self, offset)
+		FauxScrollFrame_OnVerticalScroll(self, offset, BUY_ROW_H, function() BS:RefreshBuy() end)
+	end)
+	g.scroll = scroll
+
+	g.rows = {}
+	for i = 1, BUY_ROWS do
+		local row = CreateFrame("Button", nil, g)
+		row:SetWidth(740)
+		row:SetHeight(BUY_ROW_H)
+		if i == 1 then
+			row:SetPoint("TOPLEFT", scroll, "TOPLEFT", 0, 0)
+		else
+			row:SetPoint("TOPLEFT", g.rows[i - 1], "BOTTOMLEFT", 0, 0)
+		end
+		row:SetHighlightTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight")
+		row:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+
+		-- banding tied to the slot rather than to the data, so the stripes stay
+		-- still while the list scrolls under them
+		if i % 2 == 0 then
+			local stripe = row:CreateTexture(nil, "BACKGROUND")
+			stripe:SetTexture(1, 1, 1, 0.035)
+			stripe:SetAllPoints(row)
+		end
+
+		-- listings the plan is actually taking, marked on the listing itself
+		row.pick = row:CreateTexture(nil, "BORDER")
+		row.pick:SetTexture(0.2, 0.9, 0.2, 0.12)
+		row.pick:SetAllPoints(row)
+		row.pick:Hide()
+
+		row.cells = {}
+		for c, h in ipairs(LIST_COLS) do
+			local fs = row:CreateFontString(nil, "ARTWORK")
+			Font(fs, 11, 1, 1, 1)
+			fs:SetPoint("LEFT", h[2], 0)
+			fs:SetWidth(h[3])
+			fs:SetJustifyH(h[4])
+			row.cells[c] = fs
+		end
+
+		row:SetScript("OnClick", function(self, button)
+			local o = self.offer
+			if not o then return end
+			-- the same three as the auctions table, so one habit works on both
+			if IsShiftKeyDown() and o.link then
+				BS:LinkToChat(o.link)
+				return
+			end
+			if button == "RightButton" then
+				-- the item itself, in the normal browse tab
+				BS:SearchInBrowse({ name = o.name })
+				return
+			end
+			BS:BuyOnly(o, IsControlKeyDown())
+		end)
+
+		row:SetScript("OnEnter", function(self)
+			local o = self.offer
+			if not o then return end
+			GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+			if o.link then GameTooltip:SetHyperlink(o.link)
+			else GameTooltip:SetText(o.name, 1, 1, 1) end
+			GameTooltip:AddLine(" ")
+			GameTooltip:AddDoubleLine("Price per item", BS.Money(o.unit), 0.8, 0.8, 0.8, 1, 1, 1)
+			GameTooltip:AddDoubleLine("One stack of " .. o.count, BS.Money(o.buyout),
+				0.8, 0.8, 0.8, 1, 1, 1)
+			GameTooltip:AddDoubleLine(format("All %d of them (%d items)",
+				o.qty, o.qty * o.count), BS.Money(o.qty * o.buyout), 0.8, 0.8, 0.8, 1, 1, 1)
+			if o.manyOwners then
+				GameTooltip:AddLine("Several sellers are asking exactly this.", 0.6, 0.6, 0.6, true)
+			end
+			if o.leading then
+				GameTooltip:AddLine("You are the high bidder on one of these.", 1, 0.6, 0.2, true)
+			end
+			GameTooltip:AddLine(" ")
+			GameTooltip:AddLine("Click to buy from this listing alone.", 0.5, 0.8, 1)
+			GameTooltip:AddLine("Ctrl-click for every one of them.", 0.5, 0.8, 1)
+			GameTooltip:AddLine("Shift-click to link it into chat.", 0.5, 0.8, 1)
+			GameTooltip:AddLine("Right-click to look it up in Browse.", 0.5, 0.8, 1)
+			GameTooltip:Show()
+		end)
+		row:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
+		row:Hide()
+		g.rows[i] = row
+	end
+
+	--------------------------------------------------- the plan, and the rest --
+	local planBand = g:CreateTexture(nil, "BACKGROUND")
+	planBand:SetTexture(1, 1, 1, 0.06)
+	planBand:SetPoint("TOPLEFT", 14, -336)
+	planBand:SetWidth(388)
+	planBand:SetHeight(20)
+
+	local optBand = g:CreateTexture(nil, "BACKGROUND")
+	optBand:SetTexture(1, 1, 1, 0.06)
+	optBand:SetPoint("TOPLEFT", 410, -336)
+	optBand:SetWidth(392)
+	optBand:SetHeight(20)
+
+	local planTitle = g:CreateFontString(nil, "ARTWORK")
+	Font(planTitle, 10, 1, 0.82, 0)
+	planTitle:SetPoint("TOPLEFT", 20, -340)
+	planTitle:SetWidth(380)
+	planTitle:SetJustifyH("LEFT")
+	g.planTitle = planTitle
+
+	local optTitle = g:CreateFontString(nil, "ARTWORK")
+	Font(optTitle, 10, 1, 0.82, 0)
+	optTitle:SetPoint("TOPLEFT", 416, -340)
+	optTitle:SetWidth(384)
+	optTitle:SetJustifyH("LEFT")
+	optTitle:SetText("Other ways to buy it")
+	g.optTitle = optTitle
+
+	local PLAN_COLS = {
+		{ 2,   124, "LEFT"  },
+		{ 128, 90,  "RIGHT" },
+		{ 222, 46,  "RIGHT" },
+		{ 272, 100, "RIGHT" },
+	}
+	g.planRows = {}
+	for i = 1, PLAN_ROWS do
+		local row = CreateFrame("Frame", nil, g)
+		row:SetWidth(376)
+		row:SetHeight(PLAN_ROW_H)
+		row:SetPoint("TOPLEFT", 18, -358 - (i - 1) * PLAN_ROW_H)
+		row.cells = {}
+		for c, l in ipairs(PLAN_COLS) do
+			local fs = row:CreateFontString(nil, "ARTWORK")
+			Font(fs, 11, 1, 1, 1)
+			fs:SetPoint("LEFT", l[1], 0)
+			fs:SetWidth(l[2])
+			fs:SetJustifyH(l[3])
+			row.cells[c] = fs
+		end
+		row:Hide()
+		g.planRows[i] = row
+	end
+
+	local optScroll = CreateFrame("ScrollFrame", "BidSniperBuyOptScroll", g, "FauxScrollFrameTemplate")
+	optScroll:SetPoint("TOPLEFT", 414, -358)
+	optScroll:SetWidth(360)
+	optScroll:SetHeight(PLAN_ROWS * PLAN_ROW_H)
+	optScroll:SetScript("OnVerticalScroll", function(self, offset)
+		FauxScrollFrame_OnVerticalScroll(self, offset, PLAN_ROW_H, function() BS:RefreshBuy() end)
+	end)
+	g.optScroll = optScroll
+
+	local OPT_COLS = {
+		{ 2,   54,  "RIGHT" },
+		{ 60,  104, "RIGHT" },
+		{ 168, 100, "RIGHT" },
+		{ 272, 100, "RIGHT" },
+	}
+	g.optRows = {}
+	for i = 1, PLAN_ROWS do
+		local row = CreateFrame("Button", nil, g)
+		row:SetWidth(360)
+		row:SetHeight(PLAN_ROW_H)
+		if i == 1 then
+			row:SetPoint("TOPLEFT", optScroll, "TOPLEFT", 0, 0)
+		else
+			row:SetPoint("TOPLEFT", g.optRows[i - 1], "BOTTOMLEFT", 0, 0)
+		end
+		row:SetHighlightTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight")
+
+		row.pick = row:CreateTexture(nil, "BORDER")
+		row.pick:SetTexture(1, 0.82, 0, 0.14)
+		row.pick:SetAllPoints(row)
+		row.pick:Hide()
+
+		row.cells = {}
+		for c, l in ipairs(OPT_COLS) do
+			local fs = row:CreateFontString(nil, "ARTWORK")
+			Font(fs, 11, 1, 1, 1)
+			fs:SetPoint("LEFT", l[1], 0)
+			fs:SetWidth(l[2])
+			fs:SetJustifyH(l[3])
+			row.cells[c] = fs
+		end
+
+		row:SetScript("OnClick", function(self)
+			if self.option then BS:BuyChoose(self.option) end
+		end)
+		row:SetScript("OnEnter", function(self)
+			local o = self.option
+			if not o then return end
+			local plan = BS.buyPlan
+			GameTooltip:SetOwner(self, "ANCHOR_LEFT")
+			GameTooltip:AddLine(format("%s items for %s", BS.Comma(o.n), BS.Money(o.cost)), 1, 1, 1)
+			GameTooltip:AddDoubleLine("Per item", BS.Money(o.unit), 0.8, 0.8, 0.8, 1, 1, 1)
+			if plan and plan.qty > 0 and o.n ~= plan.qty then
+				GameTooltip:AddLine(" ")
+				local dq, dc = o.n - plan.qty, o.cost - plan.cost
+				GameTooltip:AddDoubleLine(dq > 0 and "More items" or "Fewer items",
+					format("%+d", dq), 0.8, 0.8, 0.8, 1, 1, 1)
+				GameTooltip:AddDoubleLine(dc >= 0 and "More gold" or "Less gold",
+					(dc >= 0 and "+" or "-") .. BS.MoneyPlain(math.abs(dc)),
+					0.8, 0.8, 0.8, 1, 1, 1)
+				if dq > 0 and dc <= 0 then
+					GameTooltip:AddLine("More of them for no more money. Take this one.",
+						0.2, 1, 0.2, true)
+				end
+			end
+			GameTooltip:AddLine(" ")
+			GameTooltip:AddLine("Click to plan this instead.", 0.5, 0.8, 1)
+			GameTooltip:Show()
+		end)
+		row:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
+		row:Hide()
+		g.optRows[i] = row
+	end
+
+	--------------------------------------------------------------- footer --
+	local foot = g:CreateFontString(nil, "ARTWORK")
+	Font(foot, 10, 0.7, 0.7, 0.7)
+	foot:SetPoint("TOPLEFT", 18, -496)
+	foot:SetWidth(780)
+	foot:SetJustifyH("LEFT")
+	g.foot = foot
+
+	local status = g:CreateFontString(nil, "ARTWORK")
+	Font(status, 11, 1, 1, 1)
+	status:SetPoint("BOTTOMLEFT", 18, 22)
+	status:SetWidth(500)
+	status:SetJustifyH("LEFT")
+	g.status = status
+
+	-- The purchase happens in this OnClick and nowhere else. PlaceAuctionBid is
+	-- protected, so the client only honours it while handling a real click.
+	local buyBtn = CreateFrame("Button", nil, g, "UIPanelButtonTemplate")
+	buyBtn:SetPoint("BOTTOMRIGHT", -18, 18)
+	buyBtn:SetWidth(170)
+	buyBtn:SetHeight(24)
+	buyBtn:SetScript("OnClick", function()
+		if BS.buyRun and BS.buyRun.stage == "ready" then
+			BS:FireArmedBuy()
+		else
+			BS:BuyStart()
+		end
+	end)
+	Tip(buyBtn, "Buy the plan",
+		"WoW only lets an addon buy while you are actually clicking, so this is a "
+		.. "press per page of results rather than a press per auction: everything on "
+		.. "the page the plan wants goes in one press, and the button says what that "
+		.. "costs before you press it.\n\nIt never spends more than the total you "
+		.. "approved, and stops if the gold runs out.")
+	g.buyBtn = buyBtn
+
+	local stopBtn = CreateFrame("Button", nil, g, "UIPanelButtonTemplate")
+	stopBtn:SetPoint("BOTTOMRIGHT", -194, 18)
+	stopBtn:SetWidth(80)
+	stopBtn:SetHeight(24)
+	stopBtn:SetText("Stop")
+	stopBtn:SetScript("OnClick", function() BS:BuyStop("Buying stopped.") end)
+	Tip(stopBtn, "Stop buying", "Nothing already bought comes back.")
+	stopBtn:Hide()
+	g.stopBtn = stopBtn
+
+	g.refreshers = { qty, cbMine, cbAll, cbShift }
+	self.buyFrame = g
+end
+
+--[[
+	Painting the page.
+
+	Everything here is read off self.buy and self.buyPlan, which are worked out
+	elsewhere; this only decides how it looks. The one piece of thinking it does
+	is the colour on the options list, and that is the whole point of the list:
+	a quantity handing you more for no more gold is marked green, because that
+	is a mistake you should not be able to make on this page.
+]]
+function BS:RefreshBuy()
+	local g = self.buyFrame
+	if not g or not g:IsShown() then return end
+
+	-- painting writes into the boxes, and a box being written to asks for a
+	-- repaint; the other pages guard this the same way
+	if self.buyPainting then
+		self.buyDirty = true
+		return
+	end
+	self.buyPainting = true
+
+	for _, w in ipairs(g.refreshers) do if w.Refresh then w.Refresh() end end
+
+	local buy    = self.buy
+	local plan   = self.buyPlan
+	local offers = buy and buy.offers or {}
+
+	------------------------------------------------------------- summary --
+	if self.buySearch then
+		g.summary:SetText("|cffffd100Searching...|r")
+	elseif not buy then
+		g.summary:SetText("|cff888888Search for something to buy.|r")
+	else
+		local notes = {}
+		if buy.noBuyout > 0 then
+			notes[#notes + 1] = format("%d bid-only", buy.noBuyout)
+		end
+		if buy.mine > 0 then
+			notes[#notes + 1] = format("%d yours", buy.mine)
+		end
+		if buy.truncated then
+			notes[#notes + 1] = "|cffff8800only the first 1000 read|r"
+		end
+		g.summary:SetText(format("%s  -  |cffffffff%s|r for sale in %d listing%s%s%s",
+			buy.link or buy.name, BS.Comma(buy.total), buy.listings,
+			buy.listings == 1 and "" or "s",
+			#offers > 0 and format(", cheapest |cffffffff%s|r each",
+				BS.Money(offers[1].unit)) or "",
+			#notes > 0 and ("   |cff888888(" .. table.concat(notes, ", ") .. ")|r") or ""))
+	end
+
+	------------------------------------------------------------ listings --
+	-- which listings the plan is taking, so the top list can show it
+	local taking = {}
+	if plan then
+		for _, line in ipairs(plan.lines) do taking[line.offer] = line.take end
+	end
+
+	local offset = FauxScrollFrame_GetOffset(g.scroll) or 0
+	for i = 1, BUY_ROWS do
+		local row = g.rows[i]
+		local o   = offers[offset + i]
+		if o then
+			row.offer = o
+			local take = taking[o]
+			row.cells[1]:SetText(BS.Money(o.unit))
+			row.cells[2]:SetText("x" .. o.count)
+			row.cells[3]:SetText(tostring(o.qty))
+			row.cells[4]:SetText(BS.Money(o.buyout))
+			row.cells[5]:SetText(o.qty > 1 and BS.Money(o.qty * o.buyout) or "|cff666666-|r")
+			row.cells[6]:SetText(o.manyOwners and "|cff888888several|r"
+				or (o.owner or "|cff666666?|r"))
+			row.cells[7]:SetText(BS.timeLeftText[o.timeLeft] or "?")
+			row.cells[8]:SetText(take and format("|cff00ff00%d of %d|r", take, o.qty) or "")
+			if take then row.pick:Show() else row.pick:Hide() end
+			row:Show()
+		else
+			row.offer = nil
+			row:Hide()
+		end
+	end
+	FauxScrollFrame_Update(g.scroll, #offers, BUY_ROWS, BUY_ROW_H)
+
+	---------------------------------------------------------------- plan --
+	if not plan then
+		g.planTitle:SetText("What to buy")
+	elseif plan.source == "listing" then
+		g.planTitle:SetText(format("What to buy  |cff888888- from one listing, %s for %s|r",
+			BS.Comma(plan.qty), BS.MoneyPlain(plan.cost)))
+	elseif plan.source == "option" then
+		g.planTitle:SetText(format("What to buy  |cff888888- %s for %s, %s each|r",
+			BS.Comma(plan.qty), BS.MoneyPlain(plan.cost), BS.MoneyPlain(plan.unit)))
+	else
+		-- when the cheapest way past your number goes well past it, saying so
+		-- here is the difference between a surprise and a decision
+		g.planTitle:SetText(format("What to buy  |cff888888- cheapest way to %s%s|r",
+			BS.Comma(plan.target),
+			plan.qty > plan.target
+				and format(", which brings %s", BS.Comma(plan.qty)) or ""))
+	end
+
+	local lines = plan and plan.lines or {}
+	for i = 1, PLAN_ROWS do
+		local row  = g.planRows[i]
+		local last = (i == PLAN_ROWS) and #lines > PLAN_ROWS
+		local line = (not last) and lines[i] or nil
+		if line then
+			local o = line.offer
+			row.cells[1]:SetText(o.count > 1
+				and format("%d x |cffaaaaaastack of %d|r", line.take, o.count)
+				or  format("%d x |cffaaaaaasingle|r", line.take))
+			row.cells[2]:SetText(BS.Money(o.buyout))
+			row.cells[3]:SetText(tostring(line.items))
+			row.cells[4]:SetText(BS.Money(line.cost))
+			row:Show()
+		elseif last then
+			row.cells[1]:SetText(format("|cff888888and %d more...|r", #lines - PLAN_ROWS + 1))
+			row.cells[2]:SetText("")
+			row.cells[3]:SetText("")
+			row.cells[4]:SetText("")
+			row:Show()
+		else
+			row:Hide()
+		end
+	end
+
+	------------------------------------------------------------- options --
+	local options, bestN = self:BuyOptionRows()
+	local oOffset  = FauxScrollFrame_GetOffset(g.optScroll) or 0
+	local hereUnit = plan and plan.unit or 0
+	local target   = plan and plan.target or 0
+
+	--[[
+		The heading says what the list is a list of, because that was the thing
+		that was unclear. Every row reaches your number and every row past the
+		first is better value per item - so when there is only the first, the
+		honest answer is that overshooting buys you nothing here, and saying so
+		beats a list with one line in it and no explanation.
+	]]
+	local better = false
+	for i = 2, #options do
+		if options[i].unit < options[1].unit then better = true break end
+	end
+
+	if not plan then
+		g.optTitle:SetText("Other ways to buy it")
+	elseif not bestN then
+		g.optTitle:SetText(format("Other ways to buy it  |cffff8800- not enough "
+			.. "for %s|r", BS.Comma(target)))
+	elseif better then
+		g.optTitle:SetText(format("Other ways to get |cffffffff%s|r or more",
+			BS.Comma(target)))
+	else
+		g.optTitle:SetText(format("Other ways to get %s  |cff888888- buying more "
+			.. "is no better value|r", BS.Comma(target)))
+	end
+
+	for i = 1, PLAN_ROWS do
+		local row = g.optRows[i]
+		local o   = options[oOffset + i]
+		if o then
+			row.option = o
+			local here = plan and o.n == plan.qty and o.cost == plan.cost
+
+			--[[
+				The comparison the page is for. Green means this hands you more
+				than the plan does for the same gold or less - the deal you would
+				have missed. Otherwise say what the price per item does, since
+				that is what makes overshooting worth it.
+
+				"cheapest" marks the worked-out answer for your number. It used
+				to vanish from the list the moment you picked something else,
+				which left no way back to it but the button.
+			]]
+			local note, colour
+			if here then
+				note, colour = "|cffffd100this one|r", "|cffffd100"
+			elseif plan and o.n > plan.qty and o.cost <= plan.cost then
+				note, colour = "|cff00ff00more, for less|r", "|cff00ff00"
+			elseif bestN and o.n == bestN then
+				note, colour = "|cffffd100cheapest|r", "|cffffffff"
+			elseif not bestN then
+				note, colour = "|cffff8800all there is|r", "|cffff8800"
+			else
+				--[[
+					A percentage that rounds to nothing is worse than no
+					percentage: "0% cheaper each" reads as a difference and is
+					the absence of one. Below half a point, say so in words.
+				]]
+				local pct = (hereUnit > 0) and ((o.unit / hereUnit - 1) * 100) or 0
+				if pct < -0.5 then
+					note, colour = format("|cff00ff00%.0f%% cheaper each|r", -pct),
+						"|cffffffff"
+				elseif pct > 0.5 then
+					note, colour = format("|cffff8800%.0f%% dearer each|r", pct),
+						"|cff888888"
+				else
+					note, colour = "|cff888888same value|r", "|cff888888"
+				end
+			end
+
+			row.cells[1]:SetText(colour .. BS.Comma(o.n) .. "|r")
+			row.cells[2]:SetText(BS.Money(o.cost))
+			row.cells[3]:SetText(BS.Money(o.unit))
+			row.cells[4]:SetText(note)
+			if here then row.pick:Show() else row.pick:Hide() end
+			row:Show()
+		else
+			row.option = nil
+			row:Hide()
+		end
+	end
+	FauxScrollFrame_Update(g.optScroll, #options, PLAN_ROWS, PLAN_ROW_H)
+
+	---------------------------------------------------------------- foot --
+	local foot = ""
+	if plan and plan.short then
+		foot = format("|cffff8800Only %s for sale - the plan takes the lot.|r  ",
+			BS.Comma(buy.total))
+	end
+	if plan then
+		foot = foot .. format("This plan: |cffffffff%s|r items for |cffffffff%s|r, "
+			.. "|cffffffff%s|r each.", BS.Comma(plan.qty), BS.Money(plan.cost),
+			BS.Money(plan.unit))
+		if self.buyDP and self.buyDP.capped then
+			foot = foot .. "   |cff888888(options listed up to "
+				.. BS.Comma(self.buyDP.maxq) .. ")|r"
+		end
+	elseif buy then
+		foot = "Nothing to buy here."
+	end
+	g.foot:SetText(foot)
+
+	------------------------------------------------------------- buttons --
+	local run = self.buyRun
+	if run and run.stage == "ready" then
+		g.buyBtn:SetText("BUY " .. BS.MoneyPlain(run.pageCost))
+		g.buyBtn:Enable()
+	elseif run then
+		g.buyBtn:SetText("finding...")
+		g.buyBtn:Disable()
+	elseif plan and #plan.lines > 0 then
+		g.buyBtn:SetText("Buy " .. BS.Comma(plan.qty) .. " for " .. BS.MoneyPlain(plan.cost))
+		g.buyBtn:Enable()
+	else
+		g.buyBtn:SetText("Buy")
+		g.buyBtn:Disable()
+	end
+
+	if run then g.stopBtn:Show() else g.stopBtn:Hide() end
+
+	self.buyPainting = nil
+	if self.buyDirty then
+		self.buyDirty = nil
+		self:RefreshBuy()
+	end
+end
+
+function BS:ShowBuy()
+	if not self.frame then return end
+	self.frame:Show()
+	if self.tab == "buy" then self:SetTab("snipe") else self:SetTab("buy") end
+end
+
+--=============================================================================
+--  emptying a patch of your bags onto the auction house
+--=============================================================================
+
+local SELL_ROWS  = 13
+local SELL_ROW_H = 20
+
+--[[
+	A staging area you empty in one pass.
+
+	The range is in slot numbers rather than rows because rows are a drawing
+	detail - bag frames differ, and addons redraw them - whereas slot 1 is
+	always the top left. The list below the settings shows exactly what falls
+	inside the range, so "the first two rows" is whatever you can see listed.
+]]
+function BS:BuildSellUI(parent)
+	local g = CreateFrame("Frame", "BidSniperSellFrame", parent)
+	g:SetPoint("TOPLEFT", parent, "TOPLEFT", 10, -34)
+	g:SetPoint("BOTTOMRIGHT", parent, "BOTTOMRIGHT", -11, 10)
+	g:EnableMouse(true)
+	g:SetScript("OnMouseWheel", function() end)
+	g:EnableMouseWheel(true)
+	g:Hide()
+
+	g:SetBackdrop({
+		bgFile   = "Interface\\Buttons\\WHITE8X8",
+		edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+		tile = false, edgeSize = 14,
+		insets = { left = 3, right = 3, top = 3, bottom = 3 },
+	})
+	g:SetBackdropColor(0.05, 0.05, 0.07, 1)
+	g:SetBackdropBorderColor(0.35, 0.32, 0.25, 1)
+
+	local sheet = g:CreateTexture(nil, "BACKGROUND")
+	sheet:SetTexture(0.05, 0.05, 0.07, 1)
+	sheet:SetAllPoints(g)
+
+	g:SetScript("OnShow", function() BS:RefreshSell() end)
+
+	local title = g:CreateFontString(nil, "ARTWORK")
+	Font(title, 12, 1, 0.82, 0)
+	title:SetPoint("TOPLEFT", 18, -8)
+	title:SetText("Sell from your bags")
+
+	local help = g:CreateFontString(nil, "ARTWORK")
+	Font(help, 10, 0.6, 0.6, 0.6)
+	help:SetPoint("TOPLEFT", 18, -28)
+	help:SetWidth(780)
+	help:SetJustifyH("LEFT")
+	help:SetText("Pick a bag and a range of slots. Everything in it is priced from "
+		.. "Auctionator and undercut by a copper. Posting is one press per item - the client will "
+		.. "not let an addon post on its own - but every stack of the same item goes "
+		.. "in one press.")
+
+	------------------------------------------------------------- settings --
+	local function NumBox(label, x, width, get, set, tip, tipBody)
+		local fs = g:CreateFontString(nil, "ARTWORK")
+		Font(fs, 10, 0.8, 0.8, 0.8)
+		fs:SetPoint("TOPLEFT", x, -62)
+		fs:SetText(label)
+
+		local eb = MakeEditBox(g, x, -76, width)
+		eb:SetNumeric(true)
+		eb:SetAutoFocus(false)
+
+		--[[
+			Committed on every keystroke, so the list below answers as you type
+			rather than when you finally press enter. `painting` marks the
+			addon writing the saved value back, so restoring a number does not
+			read as somebody typing it and set off another round.
+		]]
+		eb.Refresh = function()
+			if eb:HasFocus() then return end
+			eb.painting = true
+			eb:SetText(tostring(get() or 0))
+			eb.painting = nil
+		end
+		local function commit()
+			if eb.painting then return end
+			set(tonumber(eb:GetText()) or 0)
+			BS:RefreshSell()
+		end
+		eb:SetScript("OnTextChanged", commit)
+		eb:SetScript("OnEnterPressed", function(self) self:ClearFocus() end)
+		eb:SetScript("OnEditFocusLost", commit)
+		if tip then Tip(eb, tip, tipBody) end
+		return eb
+	end
+
+	--[[
+		Tick as many bags as you like. The slot range below applies inside each
+		one, so two rows of the backpack and the whole of your last bag is two
+		ticks and a range of 1 to 0.
+	]]
+	local bagLabel = g:CreateFontString(nil, "ARTWORK")
+	Font(bagLabel, 10, 0.8, 0.8, 0.8)
+	bagLabel:SetPoint("TOPLEFT", 18, -62)
+	bagLabel:SetText("Bags to sell from")
+
+	g.bagChecks = {}
+	for bag = 0, 4 do
+		local cb = CreateFrame("CheckButton", nil, g, "UICheckButtonTemplate")
+		cb:SetWidth(20)
+		cb:SetHeight(20)
+		cb:SetPoint("TOPLEFT", 18 + bag * 74, -78)
+		cb:SetScript("OnClick", function() BS:ToggleSellBag(bag) end)
+
+		local fs = g:CreateFontString(nil, "ARTWORK")
+		Font(fs, 10, 0.9, 0.9, 0.9)
+		fs:SetPoint("LEFT", cb, "RIGHT", 1, 0)
+		fs:SetWidth(52)
+		fs:SetJustifyH("LEFT")
+		cb.label = fs
+
+		cb.bag = bag
+		Tip(cb, (bag == 0) and "Your backpack" or ("Bag " .. bag),
+			"Tick every bag you want emptied. The slot range applies inside each "
+			.. "of them.\n\nBags are numbered left to right along the bar.")
+		g.bagChecks[bag] = cb
+	end
+
+	local s = BS:SellSettings()
+	g.boxes = {}
+	g.boxes[1] = NumBox("From slot", 400, 46,
+		function() return BS:SellSettings().fromSlot end,
+		function(v) BS:SellSettings().fromSlot = math.max(1, v) end,
+		"First slot", "Slots count left to right, top to bottom, so slot 1 is the top "
+		.. "left of the bag.")
+	g.boxes[2] = NumBox("To slot (0 = end)", 458, 46,
+		function() return BS:SellSettings().toSlot end,
+		function(v) BS:SellSettings().toSlot = math.max(0, v) end,
+		"Last slot", "For a four-wide bag, the first two rows are slots 1 to 8.\n\n"
+		.. "0 means to the end of the bag, which is how you take whole bags of "
+		.. "different sizes with one range.")
+	g.boxes[3] = NumBox("Undercut %", 542, 46,
+		function() return BS:SellSettings().undercut end,
+		function(v) BS:SellSettings().undercut = math.max(0, math.min(90, v)) end,
+		"How far under the lowest", "Auctionator holds the cheapest price its last scan "
+		.. "saw, and that is the price this goes under. Left at 0 you post one copper "
+		.. "below the cheapest listing, which is what undercutting means. Raise it only "
+		.. "to go in deliberately cheaper. It never matches the lowest exactly, which "
+		.. "would leave you behind that auction in the sort order.")
+	g.boxes[4] = NumBox("Opening bid %", 600, 46,
+		function() return BS:SellSettings().bidPct end,
+		function(v) BS:SellSettings().bidPct = math.max(1, math.min(100, v)) end,
+		"Opening bid", "The starting bid, as a percentage of the buyout.")
+
+	local durBtn = CreateFrame("Button", nil, g, "UIPanelButtonTemplate")
+	durBtn:SetPoint("TOPLEFT", 658, -76)
+	durBtn:SetWidth(96)
+	durBtn:SetHeight(20)
+	durBtn:SetScript("OnClick", function()
+		local sc = BS:SellSettings()
+		sc.duration = (sc.duration % 3) + 1
+		BS:RefreshSell()
+	end)
+	Tip(durBtn, "How long to list for",
+		"Click to cycle 12, 24 and 48 hours. A longer listing costs a bigger deposit.")
+	g.durBtn = durBtn
+
+	local refreshBtn = CreateFrame("Button", nil, g, "UIPanelButtonTemplate")
+	refreshBtn:SetPoint("TOPLEFT", 100, -104)
+	refreshBtn:SetWidth(90)
+	refreshBtn:SetHeight(20)
+	refreshBtn:SetText("Refresh")
+	refreshBtn:SetScript("OnClick", function() BS:RefreshSell() end)
+	Tip(refreshBtn, "Read the bag again",
+		"After moving things about, or after an Auctionator scan changes the prices.")
+
+	------------------------------------------------------------- the list --
+	local heads = { { "What", 2, 300, "LEFT" }, { "Stacks", 306, 70, "RIGHT" },
+	                { "Each", 382, 130, "RIGHT" }, { "Total", 518, 130, "RIGHT" } }
+	for _, h in ipairs(heads) do
+		local fs = g:CreateFontString(nil, "ARTWORK")
+		Font(fs, 10, 0.8, 0.8, 0.8)
+		fs:SetPoint("TOPLEFT", 18 + h[2], -136)
+		fs:SetWidth(h[3])
+		fs:SetJustifyH(h[4])
+		fs:SetText(h[1])
+	end
+
+	local band = g:CreateTexture(nil, "BACKGROUND")
+	band:SetTexture(1, 1, 1, 0.06)
+	band:SetPoint("TOPLEFT", 14, -132)
+	band:SetWidth(788)
+	band:SetHeight(20)
+
+	g.rows = {}
+	for i = 1, SELL_ROWS do
+		local row = CreateFrame("Frame", nil, g)
+		row:SetWidth(740)
+		row:SetHeight(SELL_ROW_H)
+		row:SetPoint("TOPLEFT", 18, -154 - (i - 1) * SELL_ROW_H)
+
+		if i % 2 == 0 then
+			local stripe = row:CreateTexture(nil, "BACKGROUND")
+			stripe:SetTexture(1, 1, 1, 0.035)
+			stripe:SetAllPoints(row)
+		end
+
+		row.cells = {}
+		local layout = { { 2, 300, "LEFT" }, { 306, 70, "RIGHT" },
+		                 { 382, 130, "RIGHT" }, { 518, 130, "RIGHT" } }
+		for c, l in ipairs(layout) do
+			local fs = row:CreateFontString(nil, "ARTWORK")
+			Font(fs, 11, 1, 1, 1)
+			fs:SetPoint("LEFT", l[1], 0)
+			fs:SetWidth(l[2])
+			fs:SetJustifyH(l[3])
+			row.cells[c] = fs
+		end
+		row:Hide()
+		g.rows[i] = row
+	end
+
+	local foot = g:CreateFontString(nil, "ARTWORK")
+	Font(foot, 10, 0.7, 0.7, 0.7)
+	foot:SetPoint("TOPLEFT", 18, -158 - SELL_ROWS * SELL_ROW_H)
+	foot:SetWidth(780)
+	foot:SetJustifyH("LEFT")
+	g.foot = foot
+
+	--------------------------------------------------------------- buttons --
+	-- The post itself happens in this OnClick and nowhere else. StartAuction is
+	-- only honoured while the client is handling a real click.
+	local sellBtn = CreateFrame("Button", nil, g, "UIPanelButtonTemplate")
+	sellBtn:SetPoint("BOTTOMRIGHT", -18, 18)
+	sellBtn:SetWidth(150)
+	sellBtn:SetHeight(24)
+	sellBtn:SetScript("OnClick", function()
+		if BS.armedSell then
+			BS:FireArmedSell()
+			BS:SellArmNext()		-- arming is not protected, so this is free here
+		else
+			BS:SellStart()
+		end
+	end)
+	Tip(sellBtn, "Post the next one",
+		"WoW only lets an addon post while you are actually clicking, so this is one "
+		.. "press per item. Each press posts what is on the button and loads the next, "
+		.. "so you keep clicking the same spot.\n\nEvery stack of the same item goes in "
+		.. "a single press.")
+	g.sellBtn = sellBtn
+
+	local skipBtn = CreateFrame("Button", nil, g, "UIPanelButtonTemplate")
+	skipBtn:SetPoint("BOTTOMRIGHT", -174, 18)
+	skipBtn:SetWidth(80)
+	skipBtn:SetHeight(24)
+	skipBtn:SetText("Skip")
+	skipBtn:SetScript("OnClick", function() BS:SellSkip() end)
+	Tip(skipBtn, "Pass on this one", "Leaves it in the bag and loads the next item.")
+	g.skipBtn = skipBtn
+
+	local stopBtn = CreateFrame("Button", nil, g, "UIPanelButtonTemplate")
+	stopBtn:SetPoint("BOTTOMLEFT", 18, 18)
+	stopBtn:SetWidth(90)
+	stopBtn:SetHeight(24)
+	stopBtn:SetText("Stop")
+	stopBtn:SetScript("OnClick", function() BS:CancelSell() end)
+	Tip(stopBtn, "Stop posting", "Clears whatever is lined up. Nothing already posted "
+		.. "comes back.")
+
+	local count = g:CreateFontString(nil, "ARTWORK")
+	Font(count, 11, 0.7, 0.7, 0.7)
+	count:SetPoint("BOTTOMLEFT", 118, 24)
+	g.count = count
+
+	self.sellFrame = g
+end
+
+function BS:RefreshSell()
+	local g = self.sellFrame
+	if not g or not g:IsShown() then return end
+
+	-- Painting writes into the boxes, and a box being written to asks for a
+	-- repaint, so this can be reached from inside itself. Same guard the
+	-- crafting page uses, and for the same reason.
+	if self.sellPainting then
+		self.sellDirty = true
+		return
+	end
+	self.sellPainting = true
+
+	for _, eb in ipairs(g.boxes) do eb.Refresh() end
+
+	local s = self:SellSettings()
+	g.durBtn:SetText(BS.SellDurations[s.duration] or "24 hours")
+
+	-- the tick boxes, each labelled with how big that bag actually is
+	for bag = 0, 4 do
+		local cb   = g.bagChecks[bag]
+		local size = GetContainerNumSlots(bag) or 0
+		cb:SetChecked(s.bags[bag] and true or false)
+		if size > 0 then
+			cb.label:SetText(format("%s |cff888888(%d)|r",
+				(bag == 0) and "Pack" or tostring(bag), size))
+			cb:Enable()
+			cb.label:SetTextColor(0.9, 0.9, 0.9)
+		else
+			-- an empty bag slot is nothing to tick
+			cb.label:SetText((bag == 0) and "Pack" or tostring(bag))
+			cb:Disable()
+			cb.label:SetTextColor(0.4, 0.4, 0.4)
+		end
+	end
+
+	local queue, skipped = self:SellQueue()
+	local total = 0
+
+	for i = 1, SELL_ROWS do
+		local row = g.rows[i]
+		local q   = queue[i]
+		if q then
+			local worth = q.buyout * #q.slots
+			total = total + worth
+			local colour = ITEM_QUALITY_COLORS[q.quality] or ITEM_QUALITY_COLORS[1]
+			row.cells[1]:SetText((colour and colour.hex or "") .. (q.name or "?") .. "|r"
+				.. (q.count > 1 and ("  |cffaaaaaax" .. q.count .. "|r") or ""))
+			row.cells[2]:SetText(tostring(#q.slots))
+			row.cells[3]:SetText(BS.Money(q.buyout))
+			row.cells[4]:SetText("|cffffd100" .. BS.Money(worth) .. "|r")
+			row:Show()
+		else
+			row:Hide()
+		end
+	end
+
+	local notes = {}
+	if #queue > SELL_ROWS then
+		notes[#notes + 1] = format("%d more not shown", #queue - SELL_ROWS)
+	end
+	if skipped.bound > 0 then
+		notes[#notes + 1] = format("%d soulbound, skipped", skipped.bound)
+	end
+	if skipped.priced > 0 then
+		notes[#notes + 1] = format("|cffff8800%d with no Auctionator price, skipped|r",
+			skipped.priced)
+	end
+	if skipped.locked > 0 then
+		notes[#notes + 1] = format("%d locked", skipped.locked)
+	end
+
+	g.foot:SetText(format("%s.%s%s", self:SellRangeText(),
+		#queue > 0 and format("  Asking |cffffd100%s|r in all.", BS.Money(total)) or
+			"  Nothing in there to post.",
+		#notes > 0 and ("   " .. table.concat(notes, "   -   ")) or ""))
+
+	if self.armedSell then
+		g.sellBtn:SetText("SELL " .. BS.MoneyPlain(self.armedSell.buyout))
+		g.skipBtn:Show()
+	else
+		g.sellBtn:SetText(self.sellList and "Post next" or "Start posting")
+		g.skipBtn:Hide()
+	end
+	g.sellBtn:Enable()
+
+	if self.sellList then
+		g.count:SetText(format("|cffffd100%d of %d done|r",
+			(self.sellIndex or 1) - 1, #self.sellList))
+	elseif (self.sellPosted or 0) > 0 then
+		g.count:SetText(format("|cff00ff00%d posted|r", self.sellPosted))
+	else
+		g.count:SetText("")
+	end
+
+	self.sellPainting = nil
+	if self.sellDirty then
+		self.sellDirty = nil
+		self:RefreshSell()
+	end
+end
+
+function BS:ShowSell()
+	if not self.frame then return end
+	self.frame:Show()
+	if self.tab == "sell" then self:SetTab("snipe") else self:SetTab("sell") end
 end
 
 function BS:ClearSettledBids()
@@ -1854,7 +3365,13 @@ function BS:RefreshLedger()
 			local label = (color and color.hex or "") .. e.name .. "|r"
 			if e.count > 1 then label = label .. " |cffaaaaaax" .. e.count .. "|r" end
 			if (e.copies or 1) > 1 then
-				label = label .. format("  |cffffd100(%d of them)|r", e.copies)
+				-- one row stands for several auctions, so say how they split
+				if (e.outCount or 0) > 0 and (e.leadCount or 0) > 0 then
+					label = label .. format("  |cffff8800%d outbid|r|cff888888 of %d|r",
+						e.outCount, e.copies)
+				else
+					label = label .. format("  |cffffd100(%d of them)|r", e.copies)
+				end
 			end
 
 			row.cells[1]:SetText(BS.ledgerStateText[e.state] or e.state)
@@ -1895,8 +3412,17 @@ function BS:RefreshControls()
 	if self.catFrame and self.catFrame:IsShown() then self:RefreshCategories() end
 end
 
+--[[
+	The auction page's status line sits at the bottom of the window, where the
+	other pages cover it. The buy page runs queries of its own and has plenty to
+	say while they are in flight, so it keeps a line of its own and this puts
+	the same words in both.
+]]
 function BS:SetStatus(text)
 	if self.frame then self.frame.status:SetText(text or "") end
+	if self.buyFrame and self.buyFrame.status then
+		self.buyFrame.status:SetText(text or "")
+	end
 end
 
 -- Reports where every filter control really landed, so a layout problem can be
@@ -1941,6 +3467,12 @@ function BS:SearchInBrowse(r)
 		self:Print("Wait for the scan to finish first.")
 		return
 	end
+	-- Browse's own search replaces the auction list, which is the list a buy
+	-- search or a purchase is standing on
+	if self.buySearch or self.buyRun then
+		self:Print("The Buy tab is using the auction house - finish or stop it first.")
+		return
+	end
 	if not (AuctionFrame and AuctionFrame:IsShown() and BrowseName and BrowseSearchButton) then
 		self:Print("The auction house Browse tab is not available.")
 		return
@@ -1961,7 +3493,19 @@ local function ProfitText(profit)
 	return "|cffff4444-" .. BS.MoneyPlain(-profit) .. "|r"
 end
 
-local function RatioText(ratio)
+--[[
+	The ratio, and how much to believe it.
+
+	It is normally what the item is worth over what a bid costs. When nothing is
+	known about the item there is nothing to go on but the seller's buyout, and
+	a seller's opinion is not a valuation - so that case is marked rather than
+	dressed up as the same number. Grey, with a `?`, the same shorthand the
+	Profit column uses for "no idea".
+]]
+local function RatioText(ratio, from)
+	if from == "buyout" then
+		return string.format("|cff999999%.1fx?|r", ratio)
+	end
 	if ratio >= 1000 then
 		return string.format("|cffff44ff%sx|r", BS.Comma(ratio))
 	elseif ratio >= 100 then
@@ -1978,6 +3522,12 @@ function BS:UpdateUI()
 	-- so a closed window is work with nowhere to land. The ledger pane already
 	-- bows out the same way.
 	if not f or not f:IsShown() then return end
+
+	-- The other tabs paint themselves, but everything else in the addon calls
+	-- this one when something changes - so it passes the message along rather
+	-- than making every caller know which page is up.
+	if self.sellFrame and self.sellFrame:IsShown() then self:RefreshSell() end
+	if self.buyFrame  and self.buyFrame:IsShown()  then self:RefreshBuy()  end
 
 	f.scanBtn:SetText(self.scanning and "Stop" or "Scan AH")
 
@@ -2028,7 +3578,7 @@ function BS:UpdateUI()
 		f.selCount:SetText(format("%s  -  %s", rows, BS.Money(selTotal)))
 	elseif available > 0 then
 		f.selCount:SetText(format("|cff888888none of %d selected|r", available))
-	elseif #self.results > 0 and (self.db.minProfit or 0) > 0 then
+	elseif #self:Shown() > 0 and (self.db.minProfit or 0) > 0 then
 		-- nothing tickable and rows on screen: say which filter did it, or the
 		-- Select all button looks broken
 		f.selCount:SetText(format("|cffff8800none clear %s profit|r",
@@ -2046,7 +3596,8 @@ function BS:UpdateUI()
 		end
 	end
 
-	local results = self.results
+	-- the filters are a window onto the results, so this is what is behind it
+	local results = self:Shown()
 	local offset  = FauxScrollFrame_GetOffset(f.scroll) or 0
 
 	for i = 1, NUM_ROWS do
@@ -2092,7 +3643,7 @@ function BS:UpdateUI()
 			row.cells[1]:SetText(label)
 			row.cells[2]:SetText(BS.Money(r.bid))
 			row.cells[3]:SetText(BS.Money(r.buyout))
-			row.cells[4]:SetText(RatioText(r.ratio))
+			row.cells[4]:SetText(RatioText(r.ratio, r.ratioFrom))
 			row.cells[5]:SetText(r.market > 0 and BS.Money(r.market) or "|cff666666-|r")
 			row.cells[6]:SetText(ProfitText(r.profit))
 			row.cells[7]:SetText(expired and "|cff777777gone|r"

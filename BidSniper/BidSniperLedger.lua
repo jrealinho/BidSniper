@@ -303,18 +303,31 @@ function BS:ReconcileLedger(quiet)
 			local key = BS.BidKey(GetAuctionItemLink("bidder", i), name, count, minBid, buyout)
 			local cur = live[key]
 			--[[
-				Two auctions identical down to the starting bid collapse onto
-				one key. They are interchangeable for our purposes, so the only
-				question is which reading to keep, and "winning" is the safer
-				one to report: it never sends you off to re-bid something you
-				are already ahead on.
+				Two auctions identical down to the starting bid collapse onto one
+				key, and with several copies of a deal bid on at once that is the
+				ordinary case rather than a curiosity.
+
+				So they are counted rather than merged. Leading eight and being
+				outbid on one is a different situation from being outbid on all
+				eight, and reporting the second when the first is true sends you
+				off to re-bid things you are already winning.
+
+				The price kept is the dearest outbid one: that is what it would
+				actually take to get back in front.
 			]]
-			if not cur or (highBidder and not cur.highBidder) then
-				live[key] = {
-					highBidder   = highBidder and true or false,
-					bidAmount    = bidAmount or 0,
-					minIncrement = minIncrement or 0,
-				}
+			if not cur then
+				cur = { lead = 0, out = 0, bidAmount = 0, minIncrement = 0 }
+				live[key] = cur
+			end
+
+			if highBidder then
+				cur.lead = cur.lead + 1
+			else
+				cur.out = cur.out + 1
+				if (bidAmount or 0) >= cur.bidAmount then
+					cur.bidAmount    = bidAmount or 0
+					cur.minIncrement = minIncrement or 0
+				end
 			end
 		end
 	end
@@ -328,12 +341,27 @@ function BS:ReconcileLedger(quiet)
 			e.seenAt  = now
 			e.curBid  = l.bidAmount
 			e.nextBid = (l.bidAmount > 0) and (l.bidAmount + l.minIncrement) or e.minBid
-			if l.highBidder then
-				SetState(e, "leading", "you are the high bidder")
-				leading = leading + 1
-			else
-				SetState(e, "outbid", "outbid - still on the auction house")
+
+			--[[
+				The Bids tab is first-hand and exact, so it settles the split
+				rather than the mail's guesswork: this many of them are still
+				yours, this many were taken. Being outbid on one of eight is
+				worth acting on and worth saying, but it is not the same as
+				losing the lot.
+			]]
+			e.leadCount = l.lead
+			e.outCount  = l.out
+
+			if l.out > 0 then
+				SetState(e, "outbid", (l.lead > 0)
+					and format("outbid on %d of them - still leading %d", l.out, l.lead)
+					or "outbid - still on the auction house")
 				outbid = outbid + 1
+			else
+				SetState(e, "leading", (l.lead > 1)
+					and format("you are the high bidder on all %d", l.lead)
+					or "you are the high bidder")
+				leading = leading + 1
 			end
 		elseif e.state == "pending" and (now - (e.placed or 0)) < 60 then
 			-- sent moments ago; the bidder list may just not have caught up yet
@@ -508,7 +536,8 @@ function BS:StartLedgerSweep(auto)
 		if not auto then self:Print("Open the auction house first.") end
 		return
 	end
-	if self.scanning or self.bidSearch or self.batch or self.ledgerSweep then
+	if self.scanning or self.bidSearch or self.batch or self.ledgerSweep
+	   or self.buySearch or self.buyRun then
 		if not auto then self:Print("Finish the current scan or batch first.") end
 		return
 	end
@@ -783,12 +812,37 @@ function BS:ResolveLedgerFromMail(quiet)
 				local _, _, _, subject, money = GetInboxHeaderInfo(i)
 				money = money or 0
 				for _, e in ipairs(pending) do
+					--[[
+						An entry standing for several identical auctions can
+						only absorb as many refunds as it has bids: eight bids
+						can be beaten eight times and no more. Past that the
+						amount matching is a coincidence with somebody else's
+						auction, which is exactly what the second pass risks.
+					]]
+					local copies = e.copies or 1
+					local beaten = e.outCount or 0
+
 					if not used[i] and not BS.LedgerClosed(e) and money > 0
-					   and money == e.myBid
+					   and money == e.myBid and beaten < copies
 					   and (pass == 2
 					        or (subject and string.find(subject, e.name, 1, true))) then
 						used[i] = true
-						if BS.LedgerCouldStillRun(e) then
+						beaten     = beaten + 1
+						e.outCount = beaten
+						e.leadCount = math.max(0, copies - beaten)
+
+						--[[
+							Only when every copy has come back is the whole
+							entry finished. Outbid on one of eight still leaves
+							seven of your bids standing, and calling that lost
+							would quietly close a row you are still winning.
+						]]
+						if beaten < copies then
+							SetState(e, "outbid", format(
+								"outbid on %d of %d - your gold came back for those, "
+								.. "and the rest are still yours", beaten, copies))
+							live = live + 1
+						elseif BS.LedgerCouldStillRun(e) then
 							SetState(e, "outbid",
 								"outbid - your gold came back, and the auction "
 								.. "can still be running")
@@ -832,8 +886,12 @@ function BS:PrintLedger()
 			e.link or e.name,
 			BS.Money(e.myBid),
 			(e.copies or 1) > 1
-				and format("  |cffffd100on %d of them, %s in all|r",
-					e.copies, BS.Money(e.myBid * e.copies)) or "",
+				and format("  |cffffd100on %d of them, %s in all%s|r",
+					e.copies, BS.Money(e.myBid * e.copies),
+					(e.outCount or 0) > 0
+						and format(" - %d outbid, %d still yours",
+							e.outCount, e.leadCount or (e.copies - e.outCount))
+						or "") or "",
 			e.note and ("  |cff888888(" .. e.note .. ")|r") or ""))
 	end
 end
