@@ -58,6 +58,38 @@ local HARD_MAX_Q = 4000
 	copied from them, and writing to it would edit the defaults. The Sell page
 	keeps its settings the same way and for the same reason.
 ]]
+--[[
+	How many the plan is being worked out for.
+
+	The box on this page and a shopping run are two owners of the same question,
+	and they must not share one number. A run sets its own here; everything else
+	falls back to the figure you typed.
+
+	They did share BuySettings().qty, and it was wrong in a way that only shows
+	up once a run is under way. A plan is not built when the quantity is set: the
+	run sets it, fires a search, and the plan is worked out when the results come
+	back, which is a window of whole seconds. Anything that wrote to the box in
+	that window - a stale value committed as the box lost focus, a keystroke, a
+	repaint that could not update a focused box - replaced the run's quantity
+	with the page's. The run then surveyed, priced, and bought against a number
+	nobody had asked for.
+
+	Both complaints came from that. A stale figure larger than the shortfall is
+	"it is only offering me the 100 I typed earlier". A stale figure smaller than
+	the shortfall caps what the survey records as available - and since the buying
+	pass never asks for more than the survey found, the run quietly comes up short
+	on reagent after reagent, which is "it never buys everything".
+]]
+function BS:BuyTarget()
+	local n = tonumber(self.buyTarget) or self:BuySettings().qty or 1
+	return math.max(1, math.min(9999, floor(n)))
+end
+
+-- a run's claim on the quantity, dropped the moment it stops driving the page
+function BS:BuyClearTarget()
+	self.buyTarget = nil
+end
+
 function BS:BuySettings()
 	self.db.buy = self.db.buy or {}
 	local s = self.db.buy
@@ -100,27 +132,87 @@ end
 --  searching for one item
 --=============================================================================
 
-function BS:BuyStartSearch(text)
+--[[
+	Returns whether the search actually started, so a caller driving this
+	without a user watching - the shopping run - can tell a refusal from a
+	search that is merely still in flight, and move on rather than sit waiting
+	for results that were never asked for.
+
+	`internal` is the shopping run identifying itself. Everything else is a
+	person, and a person searching while a run is working down the list would
+	replace the listings the next press is about to buy from. The run's own
+	searches are the one exception, so they say so on the way in, and every
+	other route - the box, Recent, a shift-click, /snipe buy - is turned away
+	with a reason rather than silently ignored.
+]]
+function BS:BuyStartSearch(text, internal)
 	local name = BS.CleanItemName(text)
 	if not name then
 		self:Print("Type an item name, or paste an item link.")
-		return
+		return false
+	end
+
+	if self.shopRun and not internal then
+		self:Print("A shopping run is using this page. Press Skip to leave the reagent "
+			.. "it is on, or Stop to end the run.")
+		return false
+	end
+
+	if self.sellSurvey and not internal then
+		self:Print("The Sell tab is checking prices on this page. Press Stop there to "
+			.. "end the check.")
+		return false
 	end
 
 	if not self.atAH then
 		self:Print("You need to be at the auction house.")
-		return
+		return false
 	end
 
 	local why = self:BuyBusy()
 	if why then
 		self:Print("Cannot search while " .. why .. ".")
-		return
+		return false
 	end
-	if self.buySearch then return end
+	--[[
+		A search already running is replaced, not refused.
+
+		Changing your mind is the ordinary case. You click something, watch a page
+		or two go by, spot the thing you actually meant, and click that instead -
+		and until now the second click did nothing at all, silently, because a
+		search was still walking through pages. The only way out was closing the
+		auction house, which is a terrible answer to "I clicked the wrong item".
+
+		Only a person may do this. The shopping run drives searches of its own and
+		must not have one pulled out from under it half way down a list, so an
+		internal caller still waits its turn and is told no, exactly as before.
+
+		BuyCancelSearch is deliberately not used: it tells the shopping run its
+		search failed, and this search did not fail, it was replaced. A run cannot
+		be the thing being interrupted here in any case - it holds this page
+		against people entirely, further up - but calling it would be saying
+		something untrue and waiting for the day that stops being safe.
+
+		The old query may still be in the post. It cannot be read into the new
+		search: BuyListUpdate only consumes a page while buyAwaiting is set, and
+		that is cleared here and not set again until the new query actually goes
+		out. Should one still arrive late, BuyReadPage matches every row against
+		the name it is looking for, so the rows land in the "something else the
+		search dragged in" count rather than in the results.
+	]]
+	if not internal then self:BuyClearTarget() end
+
+	if self.buySearch then
+		if internal then return false end
+		self.buySearch       = nil
+		self.buyQueryPending = false
+		self.buyAwaiting     = false
+		self.buyDone         = nil
+	end
+
 	if self.buyRun then
 		self:Print("Finish or stop the purchase first.")
-		return
+		return false
 	end
 
 	--[[
@@ -160,9 +252,11 @@ function BS:BuyStartSearch(text)
 	}
 	self.buyQueryPending = true
 	self.buyThrottle     = 0
+	self.buyDone         = nil
 	self:BuyRemember(name)
 	self:SetStatus("Searching for " .. name .. "...")
 	self:RefreshBuy()
+	return true
 end
 
 --[[
@@ -276,6 +370,14 @@ function BS:BuyCancelSearch(reason)
 	self.buyAwaiting     = false
 	if reason then self:SetStatus(reason) end
 	self:RefreshBuy()
+
+	-- a shopping run is waiting on results that are never coming, and would
+	-- otherwise sit on this reagent for the rest of the evening
+	if self.shopRun then
+		self:ShopSearchFailed(reason)
+	elseif self.sellSurvey then
+		self:SellSurveyFailed(reason)
+	end
 end
 
 --[[
@@ -433,6 +535,14 @@ function BS:BuyFinishSearch()
 			self:SetStatus(format("Nothing called \"%s\" is for sale.", s.name))
 		end
 		self:RefreshBuy()
+		-- nothing for sale is an answer, and the shopping run wants it as much
+		-- as it wants a page full of offers. So does the sell check: an item
+		-- with no competition at all is a thing worth knowing before pricing it
+		if self.shopRun then
+			self:ShopSearchDone()
+		elseif self.sellSurvey then
+			self:SellSawSearch()
+		end
 		return
 	end
 
@@ -441,6 +551,20 @@ function BS:BuyFinishSearch()
 		name, BS.Comma(items), listings, listings == 1 and "" or "s",
 		BS.Money(s.rows[1].unit)))
 	self:RefreshBuy()
+
+	--[[
+		Last, and after the plan exists. A shopping run decides here whether to
+		pay for it, and that decision is made against the same plan the page is
+		showing rather than against one worked out privately.
+
+		The sell check reads the same listings for the opposite purpose: not
+		what they would cost to buy, but what they say the item is worth asking.
+	]]
+	if self.shopRun then
+		self:ShopSearchDone()
+	elseif self.sellSurvey then
+		self:SellSawSearch()
+	end
 end
 
 --=============================================================================
@@ -667,7 +791,11 @@ function BS:BuyReplan()
 		return
 	end
 
-	local target = math.max(1, floor(self:BuySettings().qty or 1))
+	-- planning a purchase is the act that retires the last one's notice: from
+	-- here the button is about what happens next, not about what already did
+	self.buyDone = nil
+
+	local target = self:BuyTarget()
 	if not self.buyDP or target > self.buyDP.maxq then
 		if not self:BuyRunDP(target) then return end
 	end
@@ -690,10 +818,11 @@ end
 function BS:BuyChoose(option)
 	local d = self.buyDP
 	if not d or not option then return end
+	self.buyDone = nil
 	local lines, cost, qty = self:BuyRebuild(option.src)
 	self.buyPlan = {
 		source = "option",
-		target = math.max(1, floor(self:BuySettings().qty or 1)),
+		target = self:BuyTarget(),
 		lines  = lines, cost = cost, qty = qty,
 		unit   = qty > 0 and (cost / qty) or 0,
 	}
@@ -710,7 +839,8 @@ end
 ]]
 function BS:BuyOnly(offer, all)
 	if not offer then return end
-	local target = math.max(1, floor(self:BuySettings().qty or 1))
+	self.buyDone = nil
+	local target = self:BuyTarget()
 	local take   = all and offer.qty or math.min(offer.qty, ceil(target / offer.count))
 	if take < 1 then take = 1 end
 
@@ -770,7 +900,7 @@ function BS:BuyOptionRows()
 	local d = self.buyDP
 	if not d then return {}, nil end
 
-	local target = math.max(1, floor(self:BuySettings().qty or 1))
+	local target = self:BuyTarget()
 	local bestN  = d.dq[math.min(target, d.maxq)]
 
 	local reach = {}
@@ -878,15 +1008,48 @@ end
 
 function BS:BuyStop(reason)
 	local run = self.buyRun
+
+	--[[
+		A press still waiting on the server is settled on the way out rather
+		than dropped. Whatever gold has already left the bag bought something,
+		and a run that ends here - the auction house closing, or Stop being
+		pressed - must still account for it or the reagent silently arrives in
+		the post having been reported as never bought.
+	]]
+	if run and run.pending then
+		local p = run.pending
+		local spent = p.money - GetMoney()
+		if spent < 0 then spent = 0 end
+		self:BuyCommit(p, math.min(spent, p.cost), spent < p.cost)
+	end
+
 	self.buyRun = nil
 	if run and run.bought > 0 then
 		self:Print(format("Bought %d auction%s - %s items for %s.",
 			run.bought, run.bought == 1 and "" or "s",
 			BS.Comma(run.got), BS.Money(run.spent)))
+
+		-- what the page says happened, until something replaces it. Cleared by
+		-- anything that plans a new purchase, so it can never sit above one.
+		self.buyDone = {
+			name = run.name, qty = run.got, cost = run.spent,
+			auctions = run.bought, at = GetTime(),
+		}
 		self:BuySettle(run)
 	end
 	if reason then self:SetStatus(reason) end
 	self:RefreshBuy()
+
+	--[[
+		A purchase the shopping run started has ended - finished, out of gold,
+		or stopped - so it is that run's turn again.
+
+		`run.shop` is what makes this safe to do from every exit at once: a
+		purchase you started by hand while no run is going has no such mark, and
+		a run being shut down has already cleared itself, so neither can be
+		mistaken for a reagent that is ready to be moved on from.
+	]]
+	if run and run.shop and self.shopRun then self:ShopItemDone(run) end
 end
 
 --[[
@@ -920,8 +1083,22 @@ function BS:BuySettle(run)
 	end
 	buy.offers, buy.total, buy.listings = rows, items, listings
 
+	--[[
+		And no new plan is worked out. That is a safety decision, not an
+		oversight, and it is the whole reason this function ends here.
+
+		Replanning automatically put a fresh, pressable purchase on the button
+		the instant the last one finished - same place on screen, same shape,
+		same wording, differing only in a number. One more click on a button
+		that had just been clicked several times bought a second load of
+		everything, and nothing on the page had said the first was over.
+
+		So a finished purchase leaves nothing armed. Buying again means asking
+		for it: press Plan, pick a listing, or change the quantity. Each of
+		those is a deliberate act, and each of them clears the finished notice
+		on its way through.
+	]]
 	self.buyDP, self.buyPlan = nil, nil
-	if #rows > 0 then self:BuyReplan() end
 end
 
 --[[
@@ -958,6 +1135,10 @@ function BS:BuySweep(andBuy)
 	]]
 	local counting, n, cost = {}, 0, 0
 
+	-- what this press actually asked for, key by key, so the money can be
+	-- matched against it afterwards
+	local pressed, order = {}, {}
+
 	for i = 1, (num or 0) do
 		local name, _, count, _, _, _, _, _, buyout = GetAuctionItemInfo("list", i)
 		if name == run.name and (buyout or 0) > 0 then
@@ -978,12 +1159,30 @@ function BS:BuySweep(andBuy)
 				cost = cost + buyout
 
 				if andBuy then
+					--[[
+						Asked for, not bought. PlaceAuctionBid is a request with
+						no answer: it returns nothing whether the auction is
+						still there or somebody took it a second ago, and the
+						client says not a word either way.
+
+						So nothing is counted here. What was pressed is written
+						down, and the money is what settles it - see BuyConfirm.
+						Counting at this point is what had the page reporting
+						four purchases against two the server actually made, and
+						a shopping run moving on from a reagent it had not
+						filled.
+					]]
 					PlaceAuctionBid("list", i, buyout)
-					w.left     = w.left - 1
-					w.taken    = (w.taken or 0) + 1
-					run.bought = run.bought + 1
-					run.got    = run.got + (count or 1)
-					run.spent  = run.spent + buyout
+					w.left      = w.left - 1
+					w.pressed   = (w.pressed or 0) + 1
+
+					local e = pressed[key]
+					if not e then
+						e = { key = key, n = 0, buyout = buyout, count = count or 1 }
+						pressed[key] = e
+						order[#order + 1] = e
+					end
+					e.n = e.n + 1
 				else
 					counting[key] = (counting[key] or 0) + 1
 				end
@@ -991,7 +1190,126 @@ function BS:BuySweep(andBuy)
 		end
 	end
 
-	return n, cost
+	return n, cost, order
+end
+
+--=============================================================================
+--  did that press actually buy anything?
+--=============================================================================
+
+--[[
+	The client will not tell us, so the gold has to.
+
+	PlaceAuctionBid is fire and forget. It returns nothing, it raises nothing,
+	and an auction somebody else bought a moment ago fails exactly as silently
+	as one that succeeds. Believing the press was the purchase is how the page
+	came to report four auctions bought against the two the server actually
+	made - and worse, how a shopping run moved on from a reagent it was still
+	short of, because as far as it knew the order had been filled.
+
+	What cannot be argued with is the money. It falls by exactly the buyout of
+	every auction that really was bought and by nothing else, so the difference
+	across a press is the truth about that press, whatever the client did or did
+	not say.
+
+	It is not instant: the fall arrives with the server's answer, some time
+	after the press. So this is asked once per round trip and allowed to say
+	"not yet" a few times before it gives up and treats the difference as
+	auctions that got away.
+]]
+local CONFIRM_TRIES = 3
+
+-- how many times one auction may be pressed before it is written off. Two
+-- failures is somebody else's purchase, not a slow server.
+local RETRY_LIMIT = 2
+
+function BS:BuyConfirm()
+	local run = self.buyRun
+	local p   = run and run.pending
+	if not p then return true end
+
+	local spent = p.money - GetMoney()
+	if spent < 0 then spent = 0 end
+
+	if spent >= p.cost then
+		self:BuyCommit(p, p.cost, false)
+		return true
+	end
+
+	if p.tries < CONFIRM_TRIES then
+		p.tries   = p.tries + 1
+		run.page  = 0
+		run.stage = "query"
+		self:SetStatus(format("Waiting for the auction house to confirm %s...",
+			BS.Money(p.cost)))
+		return false
+	end
+
+	-- it has had its chances: whatever the gold says is what happened
+	self:BuyCommit(p, spent, true)
+	return true
+end
+
+--[[
+	Write down what the gold says was bought.
+
+	Where a press covered several different auctions the successes are
+	attributed key by key, and within a key every auction costs the same, so the
+	count that fits the money is exact rather than a guess. Across keys it is a
+	greedy fit - which of two different auctions failed cannot be known from a
+	single figure - but the totals it produces are right either way, and the
+	totals are what the run and the report are built on.
+
+	Anything that did not go through goes back on the wanted list to be tried
+	once more, because an auction can fail simply for arriving in a list the
+	server had not finished updating. Twice, though, and it is gone: something
+	that fails on a fresh list is not coming back, and retrying it forever is
+	how a purchase loop stops terminating.
+]]
+function BS:BuyCommit(p, spent, partial)
+	local run = self.buyRun
+	if not run then return end
+	run.pending = nil
+
+	local purse, gotN, gotItems, gotCost = spent, 0, 0, 0
+
+	for _, e in ipairs(p.byKey) do
+		local ok = e.n
+		if partial then
+			ok = math.min(e.n, floor(purse / e.buyout))
+			if ok < 0 then ok = 0 end
+		end
+		purse = purse - ok * e.buyout
+
+		local w = run.want[e.key]
+		if w then
+			w.taken = (w.taken or 0) + ok
+			local missed = e.n - ok
+			if missed > 0 then
+				w.failed = (w.failed or 0) + 1
+				if w.failed <= RETRY_LIMIT then w.left = w.left + missed end
+			end
+		end
+
+		gotN     = gotN + ok
+		gotItems = gotItems + ok * e.count
+		gotCost  = gotCost + ok * e.buyout
+	end
+
+	run.bought = run.bought + gotN
+	run.got    = run.got + gotItems
+	run.spent  = run.spent + gotCost
+
+	if gotN > 0 then
+		self:Print(format("Bought %d auction%s for %s.",
+			gotN, gotN == 1 and "" or "s", BS.Money(gotCost)))
+	end
+	if gotN < p.n then
+		self:Print(format("|cffff8800%d of the %d did not go through|r - taken by "
+			.. "somebody else between the page being read and the button being "
+			.. "pressed. Nothing was charged for %s.",
+			p.n - gotN, p.n, p.n - gotN == 1 and "it" or "them"))
+	end
 end
 
 -- anything left to look for?
@@ -1008,8 +1326,17 @@ function BS:BuyPageReady()
 	local run = self.buyRun
 	if not run then return end
 
+	--[[
+		Before anything else: did the last press actually buy anything? Until
+		that is settled the wanted counts are a guess, and deciding the run is
+		finished on a guess is the whole bug this exists to close. A "not yet"
+		queues another round trip and comes back here.
+	]]
+	if not self:BuyConfirm() then return end
+
 	if self:BuyOutstanding() <= 0 then
-		self:BuyStop("Bought everything the plan asked for.")
+		self:BuyStop(format("Bought everything the plan asked for - %s items for %s.",
+			BS.Comma(run.got), BS.Money(run.spent)))
 		return
 	end
 
@@ -1050,7 +1377,10 @@ function BS:FireArmedBuy()
 	local run = self.buyRun
 	if not run or run.stage ~= "ready" then return end
 
-	local n, cost = self:BuySweep(true)
+	-- read before the presses, because the fall this is measured against
+	-- arrives with the server's answer rather than with the press
+	local before   = GetMoney()
+	local n, cost, byKey = self:BuySweep(true)
 
 	if n == 0 then
 		-- the page moved between the offer and the press, or the gold did
@@ -1058,14 +1388,15 @@ function BS:FireArmedBuy()
 		return
 	end
 
-	self:Print(format("Bought %d auction%s for %s.", n, n == 1 and "" or "s",
-		BS.Money(cost)))
-
-	if self:BuyOutstanding() <= 0 then
-		self:BuyStop(format("Done: %s items for %s.",
-			BS.Comma(run.got), BS.Money(run.spent)))
-		return
-	end
+	--[[
+		Nothing is claimed yet, and nothing is finished yet. Both of those used
+		to be decided here, on the strength of having pressed the button - which
+		is precisely what the client gives no grounds for. The round trip below
+		is what settles it, and BuyConfirm reads the gold when it lands.
+	]]
+	run.pending = {
+		money = before, cost = cost, n = n, byKey = byKey, tries = 0,
+	}
 
 	--[[
 		Back to the first page rather than on to the next. Every auction bought
@@ -1075,8 +1406,8 @@ function BS:FireArmedBuy()
 	]]
 	run.page  = 0
 	run.stage = "query"
-	self:SetStatus(format("%s of %s bought - finding the rest...",
-		BS.Comma(run.got), BS.Comma(run.items)))
+	self:SetStatus(format("Pressed %d auction%s for %s - waiting for the auction "
+		.. "house to confirm...", n, n == 1 and "" or "s", BS.Money(cost)))
 	self:RefreshBuy()
 end
 
@@ -1167,9 +1498,13 @@ end
 -- the auction house has gone: everything here points at a list that is no
 -- longer there
 function BS:BuyForget()
+	self:BuyClearTarget()
 	self.buySearch       = nil
 	self.buyQueryPending = false
 	self.buyAwaiting     = false
+	-- last visit's result, on a page about to be emptied: it would still be
+	-- sitting there next time the auction house opened
+	self.buyDone         = nil
 
 	local run = self.buyRun
 	self.buyRun = nil
@@ -1181,6 +1516,10 @@ function BS:BuyForget()
 			BS.Comma(run.got), BS.Money(run.spent)))
 		self:BuySettle(run)
 	end
+
+	-- and a shopping run is a queue of searches against a list that has gone,
+	-- so it ends here too - with whatever the last purchase managed counted in
+	if self.shopRun then self:ShopForget(run) end
 end
 
 --=============================================================================

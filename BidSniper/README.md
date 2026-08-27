@@ -374,6 +374,24 @@ doing rather than eyeballing.
 * **Right-click** looks the item up in the normal Browse tab.
 * **Best mix** puts the worked-out plan back after either of those.
 
+### Changing your mind mid-search
+
+A search walks the auction house a page at a time, and you don't have to wait
+for it. **Click another item and the search in flight is dropped for the new
+one** — from the box, the Recent list, a shift-click or `/snipe buy`, all the
+same. Pressing **Search** again does the same.
+
+There's also a **Stop** button while a search is running, for when you want to
+stop without starting another.
+
+Previously the second click did nothing at all, silently, and the only way out
+was closing the auction house.
+
+A shopping run is the one exception: it drives searches of its own and won't
+have one pulled out from under it half way down a list. It already holds this
+page against manual searches anyway, and says so when you try.
+
+
 ### Shift-click anything to look it up
 
 **Shift-click an item anywhere — your bags, a link in chat, a loot window, the
@@ -475,22 +493,222 @@ nothing there to buy outright.
 
 ---
 
-## Flasks and elixirs
+## Selling
 
-The window has four tabs, top left: **Auctions** is everything above, **Buy** is
-the section before this one, **Sell** posts from your bags, and **Flasks**
-costs out every flask and elixir you can make against current reagent prices, and
-says what each one would earn.
+The **Sell** tab is a staging area. Tick the bags and slot range you use as
+"stuff to sell", drop things into it as you play, and empty it in one pass at
+the auction house.
 
-It gets the whole window rather than a panel hanging off the edge, which is what
-makes room for **Sells for** as its own column and for the reagent breakdown to
-sit under the list instead of in a tooltip.
+The ticked bags are **one run of space**, not the same window cut out of each of
+them. **From slot** cuts into the first ticked bag, **To slot** stops part way
+through the last, and every bag between them is taken whole:
 
-**Setup is opening your alchemy window once.** The client won't say what a
+> backpack + bag 1 + bag 4, from slot 5, to slot 8 → the backpack from slot 5 to
+> its end, **all** of bag 1, and bag 4 up to slot 8.
+
+Tick one bag and both numbers land on it, which is the ordinary case. `0` for To
+slot means carry on to the end, so whole bags of different sizes need no numbers
+at all.
+
+Everything in that range is grouped by item, priced against a **live check of
+the auction house**, undercut, and listed:
+
+| Column | What it is |
+| --- | --- |
+| What | The item, and how many of it are in the range |
+| Per lot | How many go in **one auction** — type here |
+| Auctions | The shape that makes, e.g. `5 x 4 + 3` |
+| Each | What one full lot is asking |
+| Total | What the whole heap is asking |
+
+The list **scrolls** — by the bar or the mouse wheel anywhere over the panel —
+so every item is reachable and every lot size editable before you post anything.
+The footer counts the whole plan, not the rows on screen.
+
+### It checks the market before it posts anything
+
+Undercutting means going a copper under the cheapest listing, and that is right
+almost all the time. It is catastrophic the rest of the time. Somebody misplaces
+a decimal, or dumps a stack to clear a bag, and pricing off the cheapest listing
+**copies their mistake onto everything you own of that item** — the auctions go
+up, somebody takes them all inside a minute, and the gold is gone.
+
+So the first press searches. One query per item, buying nothing, and afterwards
+every price on the page is seconds old and has been argued with. The button says
+**Check prices & post** while that is still needed and **Start posting** once it
+isn't; a check finding nothing to ask about falls straight through to posting.
+
+#### It doesn't ask twice
+
+**A recent scan answers for free.** A sweep walks every auction on the house, so
+it already knows what the check wants to know — and it now keeps the **cheapest
+eight** listings of each item with a count beside them, rather than the single
+lowest price it used to. That one number was exactly the wrong thing to keep:
+the lowest listing is precisely the one that might be somebody's misplaced
+decimal, and a single figure carries no way to tell. Eight is enough to run the
+same outlier test, so anything the sweep saw is priced instantly and never
+searched for.
+
+The limit is honest: to notice that `m` giveaways sit below the real market you
+must have kept `m + 1` prices, so the scan path spots up to **seven**. Past that
+it cannot tell a collapsed market from a misprice — it marks the row `!` in red
+and says so, and **Refresh** asks the auction house properly. A live search has
+no such limit.
+
+A quote stands for **an hour**, and it is **saved** — so coming back to a half
+emptied bag, after a reload or a restart, costs no queries at all for anything
+already checked. Only items neither the scan nor a recent check can answer for
+are searched.
+
+An hour is deliberately long. A price that old isn't what the item is worth to
+the copper any more, and that is not what this figure is for: the expensive
+mistake it exists to stop is undercutting a giveaway by two orders of magnitude,
+and the *shape* of a market — a wall of listings around 190g with two idiots at
+1g — does not rearrange itself in an afternoon. Being a few percent behind on
+the wall costs a slower sale; being fooled by the 1g costs the stock. Meanwhile
+the cost of a shorter window is paid every single time, in queries, while you
+stand at the auction house waiting to post a bag you have already decided about.
+
+**Refresh** throws the quotes away as well as re-reading your bags, so it is the
+way to force a fresh look when you know something has just moved.
+
+#### What counts as a giveaway
+
+The cheapest listing is only disregarded when there is a real **cliff** above it
+*and* the listings below that cliff are a small minority of what's up. Both
+halves matter, and they pull against each other:
+
+| Situation | What it does |
+| --- | --- |
+| Two silly listings under a wall of sensible ones | Ignores the two, prices under the wall |
+| Someone undercutting properly, 25% under | **Leaves it alone** — that's the market working |
+| A dumper holding the whole bottom of the list | **Leaves it alone** — if 10 of 15 auctions are at 2g, 2g is what it costs today |
+| Only one other auction up | Uses it, and says it couldn't be checked |
+| Nothing else for sale | Falls back to the last scan |
+
+The cliff is **2.5×** — undercutting is a few percent, a clearance is tens of
+percent, nobody prices at a third of the going rate and means it as a trade. At
+most two listings, or 40% of them, may be written off, and never all of them:
+something has to be left to be the price. It searches for the *largest* gap in
+that range rather than the first, because outliers cluster — a bottom of 1g, 2g,
+190g has no cliff between the first two and a very large one after them.
+
+Your own auctions never count as competition, whichever character posted them.
+Undercutting yourself is how a price walks to the floor over a week of
+relisting.
+
+Rows are marked `*` in orange where a giveaway was disregarded, `?` in yellow
+where there was only one rival to judge by, and `!` in red where the scan could
+not see past the giveaways and the figure may still be low. Hover any row for the full working:
+what's up, what was ignored, what you'll ask.
+
+### Per lot: how many in one auction
+
+**Per lot** is the number of items in a single auction, and it is **saved
+against the item**. Set Saronite Ore to 4 once and every future posting of
+Saronite Ore goes up in fours, on that character and every other one, until you
+change it.
+
+Whatever is left over after the whole lots goes up as **one last smaller
+auction**, priced for its own size:
+
+> 23 Saronite Ore, per lot 4 → **five auctions of 4, then one of 3.**
+
+The remainder is posted rather than left behind, which is the whole point — a
+half stack sitting in your bags is the easiest way to end up carrying the same
+three ore around for a week. It is priced for three, not for four.
+
+**It can be changed mid-run.** Remembering late is the ordinary case — the price
+check is the moment you are finally looking at what the item is worth, and that
+is exactly when it occurs to you that it should go up in fives. Type the new
+size, press enter, and everything still to go is worked out again around it. The
+run is rebuilt from your bags rather than patched: anything already posted has
+left them, so what is in them now *is* the remainder.
+
+Blank or `0` means **a full stack**, which is what posting did before there was
+a setting, so a list you have never touched behaves exactly as it always did.
+A number at or above the item's own stack limit is stored as "no choice",
+so the setting still means what you meant if you later post the same item from
+bags that hold a bigger stack.
+
+### One press per lot
+
+WoW will not let an addon post an auction on its own — `StartAuction` is only
+honoured while the client is handling a real click, the same rule that makes
+[bidding one press per auction](#why-bidding-needs-a-click). So posting is one
+press per **lot**, not per auction: all five lots of four go up in a single
+press, because the auction house takes a stack size and a number of stacks
+together.
+
+An item that divides evenly is one press. An item with a remainder is two — the
+whole lots, then the remainder — and the button greys to **Waiting…** in
+between while the stacks actually leave your bags. That pause is not optional:
+loading the remainder in the same click would pick up a stack the server is
+still in the middle of taking.
+
+### What it will and won't do
+
+* It never posts more than the ticked range is holding. The count is taken
+  again at the moment of each press, so a range that shrank between drawing the
+  plan up and reaching a lot posts less rather than reaching elsewhere for the
+  difference.
+* It cannot control **where** the client sources the items from. The auction
+  house gathers a stack size from your bags as a whole, so if you hold the same
+  item outside the ticked range, some of those copies may be the ones that go.
+  The number posted is still exactly what the range said.
+* Soulbound, quest and conjured items are skipped — they cannot be auctioned.
+  So are locked slots and anything with no known price, which is left alone
+  rather than guessed at.
+
+`/snipe sellplan` prints the whole plan to chat, item by item and lot by lot,
+without opening the window.
+
+---
+
+## Crafting
+
+The tabs come in two families, with a gap drawn between them.
+
+**Auctions**, **Buy** and **Sell** are the auction house itself: what's for sale,
+buying it, selling yours. **Profit** and **Training** are a different job — what
+to do with what you bought.
+
+Those last two are *modes*, not professions. A mode is why you're looking:
+
+| Mode | Asks |
+| --- | --- |
+| **Profit** | What does this cost to make, and what does it earn? |
+| **Training** | What's the cheapest way to buy a skill point? |
+
+Which profession a mode is showing is chosen **on the page**, from a row of
+buttons beside the title — so ten professions still cost two tabs. A profession
+can be offered in either mode or both; they aren't mutually exclusive, and a
+trade you level today is often one you'll make money from tomorrow.
+
+Out of the box: alchemy under **Profit**, leatherworking under **Training**. See
+[Adding a profession](#adding-a-profession) to change or extend that — it's a
+table, not a code change.
+
+A crafting page gets the whole window rather than a panel hanging off the edge,
+which is what makes room for six columns and for the reagent breakdown to sit
+under the list instead of in a tooltip.
+
+**Setup is opening the tradeskill window once.** The client won't say what a
 character can make unless that window is open, so BidSniper reads it the moment
-you do — no button to press — and keeps the recipes through logging out. Only
-flasks and elixirs are kept, decided by the crafted item's own subclass rather
-than a list of names that would go stale.
+you do — no button to press — and keeps the recipes through logging out. It reads
+whichever profession is open, into that profession's own book.
+
+### Profit: what it earns
+
+Alchemy keeps only flasks and elixirs, decided by the crafted item's own subclass
+rather than a list of names that would go stale — the rest of an alchemist's
+window is things nobody trades.
+
+| Column | Is |
+| --- | --- |
+| **Reagents** | What its reagents cost on the auction house right now |
+| **Sells for** | What the finished item is going for |
+| **Profit** | The difference, sorted dearest first |
 
 ### The prices are free
 
@@ -508,10 +726,69 @@ fill in beside it. One request, one cooldown, both sets of answers. It takes
 smaller bites while doing this so Auctionator still gets its frames. `/snipe
 piggyback` turns it off.
 
+**And the other way round.** Pressing **Scan AH** here used to leave
+Auctionator's database exactly where it was — same dump, same cooldown, only one
+addon any the wiser. Now a fast scan updates both.
+
+The trick is who asks. Auctionator makes the GetAll request (its query is
+identical to ours, argument for argument), we hold it still while the dump
+arrives, we read the whole thing at our own pace, and *then* we let it look. It
+walks an untouched list, updates its own prices with its own code, and prints its
+own summary under ours.
+
+> **Why the order matters.** Auctionator ends a full scan by querying for an item
+> called `xyzzy` — a deliberate miss, to replace forty thousand rows with none and
+> give the memory back. Sensible alone, fatal to anyone still reading, and we read
+> a slice per frame so the client doesn't freeze. So we finish first, always.
+
+Nothing is hooked or replaced; holding it still is one variable of Auctionator's
+own, and every symbol this needs is checked for before anything happens. On a
+version it doesn't recognise the scan just makes its own request as before and
+says so. If the list isn't obviously still the full dump when the handover
+comes, it's refused outright — handing Auctionator a single 50-row page would
+overwrite a server's worth of prices with it.
+
+A scan that stops early, times out, or ends because the auction house closed
+hands over nothing and leaves Auctionator's database untouched.
+
+`/snipe atrsync` turns it off; `/snipe debug` says whether it's working.
+
 ### What you're holding, and what to buy
 
-**Can make** is how many you could produce right now out of your bags, without
-buying or fetching anything.
+Three counts sit together on the Profit page, and they only mean anything
+against each other:
+
+| Column | What it counts |
+| --- | --- |
+| **Can make** | How many more times you could make it right now out of your bags, without buying or fetching anything |
+| **Have** | How many finished ones are in your bags — how far through the batch you actually are |
+| **On AH** | How many you already have listed |
+
+Bags only, in all three. A stack in the bank shows in the row's tooltip and is
+never counted: the sums are about what you can act on without walking anywhere.
+The tooltip carries all three plus the bank figure.
+
+#### Want and Can make are both counted in crafts
+
+**Want is how many times to make it, not how many items to end up holding.**
+Type 15 against a flask that makes two and you get 15 crafts and 30 flasks, and
+reagents are bought for all 15.
+
+That matters for anything whose yield isn't 1. Want used to be read as a number
+of finished items and divided by the yield, so 15 came out as **eight** crafts —
+which disagreed with **Can make** sitting right beside it, because Can make has
+always counted complete sets of reagents. Two adjacent columns in two different
+units invite exactly the comparison that can't be made.
+
+The divisor was also the *average* of what the recipe can produce, and for
+anything with a chance-based extra that average is not a promise: buying for it
+means buying for the lucky case and coming up short when the luck doesn't
+arrive.
+
+Crafts is also the number you actually control — you queue crafts in the
+tradeskill window; how many items fall out is the recipe's business. Where the
+two differ the row tooltip spells it out: *"Each craft makes 2"*, and *"From
+what is in your bags — 8 crafts = 16"*.
 
 **Click a recipe** and the lower half shows its reagents as `have/need`, green
 once you have enough, with how many more you're short.
@@ -573,6 +850,425 @@ materials into a flask is worth doing at today's prices either way.
 
 Profit is raw; the 5% auction house cut is in the tooltip, as with the results
 list.
+
+### Buy the list
+
+**Buy the list** takes the shopping list to the Buy tab and works down it for
+you. You don't search for anything.
+
+For each reagent in turn it fills in the search, reads every page of results,
+solves the same covering knapsack the Buy tab solves by hand — the cheapest set
+of auctions that gets you at least what you're short of — and arms the purchase.
+You press **BUY**. It moves straight on to the next reagent.
+
+The list is walked dearest first, so if the gold runs out it ran out on the
+cheap end.
+
+**You approve one total, at the start.** The dialog names it, and a run never
+spends past it however the market behaves. There's no confirmation per reagent:
+one decision that means something beats fifteen that teach you to click through
+them.
+
+#### It won't pay more than the list said
+
+This is the whole safety of it. Each reagent has a quote from the last scan, and
+a run pays at most that plus a margin — the `pay up to +20%` box next to the
+button. Anything dearer is left alone, named in chat with both figures, and the
+run carries on.
+
+The margin is measured **against the part of the purchase you actually needed**,
+which matters more than it sounds:
+
+| Situation | What a naive check does | What this does |
+| --- | --- | --- |
+| Short 40, cheapest cover is 50 for less than 40 was quoted | fine | **buys** — the overshoot is free |
+| Short 2, the only thing up is a stack of 20 for 380g | per-item price looks fine, **spends 380g** | **leaves it** — 2 were quoted at 40g |
+| Short 40, only 5 up at six times the price | total is under the 40-item quote, **buys** | **leaves it** — 5 were quoted at 25g |
+
+So a stack that overshoots is judged on the items you wanted, not on the ones
+that came along with them; and a purchase that falls short is judged on what it
+actually got.
+
+`0%` means never a copper over the quote. Above that is a margin for the cheap
+auction that got taken between the scan and the trip — 20% is a sensible start,
+and a genuinely moved market still stops a run.
+
+> **A run can come back having bought half the list. That's the correct
+> outcome.** Prices move, and quietly paying triple for Frost Lotus because it
+> was on a list you approved ten minutes ago is the thing this exists to stop.
+> Everything it left alone is named, with both figures, and is one search away on
+> the tab you're already looking at.
+
+#### It looks at everything before it buys anything
+
+A recipe you're one reagent short of is a recipe you can't make. Buying forty
+flasks' worth of everything *else* is money spent on flasks that won't exist.
+
+That can't be caught by reacting to shortages as they come up, because the
+shortage is rarely in the reagent the list happens to reach first. So a run goes
+round twice:
+
+1. **Check.** Every reagent is searched and **nothing is bought**. All that comes
+   out of it is one number each — how many you could actually get, at a price
+   worth paying.
+2. **Solve.** Those numbers together decide how many of each recipe are really
+   makeable.
+3. **Buy.** The list is bought to the corrected numbers.
+
+Before a copper moves, it tells you what it concluded:
+
+```
+What the auction house can actually supply:
+   Elixir of Detect Undead   12 instead of 40   - not enough Ghost Mushroom
+Buying for those numbers, not the ones you typed.
+```
+
+"At a price worth paying" is doing real work in step 1. A reagent with 200 up,
+of which the first 30 are sensible and the rest are somebody's fantasy, supplies
+**30** — because 30 is what will be bought, so 30 is what the recipes have to be
+worked out from.
+
+Each recipe is limited by **all** of its reagents at once. That has to be one
+calculation rather than a cap per reagent: cutting an elixir because of Ghost
+Mushroom frees the Grave Moss it was holding, and a per-reagent cap has no way to
+hand that back — quantities only ever come down, so a recipe cut early stays cut
+after the reason has gone. Here each recipe takes what it can actually have, and
+what it doesn't take stays on the table for the next one.
+
+Where several recipes want the same scarce thing it goes **most profitable
+first** — the order the Craft page is already sorted in — because half a batch of
+two things is worth less than a whole batch of the better one. Only whole crafts
+count: five of something you need two of makes two, never two and a half.
+
+Reagents with **no price** are looked up rather than ignored. They're still never
+bought — there's no quote to hold them to — but what's for sale decides how many
+of everything else is worth buying, and a reagent nobody can price is just as
+capable of being the one you can't get.
+
+The bank counts here, and only here. It never stops a reagent being bought — the
+list has always counted bags alone — but it would be a worse lie to say you can't
+make a flask you plainly have the materials for.
+
+**Your Want column is never touched.** The run works on its own copy, so fixing
+the short reagent and running it again picks up the rest.
+
+#### A press is a request, not a purchase
+
+`PlaceAuctionBid` returns nothing. An auction somebody else bought a second ago
+fails exactly as silently as one that succeeds, and the client says nothing
+either way. Counting presses as purchases meant the page could report four
+auctions bought against the two the server actually made — and worse, a shopping
+run would move on from a reagent it was still short of, because as far as it knew
+the order had been filled.
+
+**The gold is the witness.** Your money falls by exactly the buyout of every
+auction that really was bought and by nothing else, so the difference across a
+press is the truth about that press. It arrives with the server's answer rather
+than with the press, so each press is followed by a round trip and up to three
+checks before the difference is taken as final.
+
+Anything that didn't go through goes back on the wanted list and is tried once
+more — an auction can fail simply for arriving in a list the server hadn't
+finished updating. Twice, and it's written off: something that fails on a fresh
+list isn't coming back.
+
+Purchases are also planned against a search that is **seconds** old rather than
+the one the check pass ran minutes earlier, which is where most "not found"
+came from in the first place.
+
+#### It goes back for what it didn't get
+
+A purchase buys against a plan built from one search. Auctions named in that plan
+get taken by other people while the run works through them — and a plan cannot
+buy what it never listed. So a run could come back with **45 of the 75** it
+wanted while the auction house still held plenty, report the plan as filled, and
+move on. The shortfall was real and invisible: nothing compared what arrived
+against what was asked for.
+
+Now it does. When a reagent's purchase ends short, the run **searches again and
+buys the difference**, up to four passes. Every pass re-searches, re-plans and
+re-prices against what is up *now*, so the price ceiling, the budget and the gold
+check apply to the rest of the order exactly as they did to the start of it.
+
+It goes round again only if the pass that just ended **actually bought
+something**. That is what makes it stop rather than a counter: each pass strictly
+reduces what is outstanding. A pass that bought nothing has already answered the
+question — the price is wrong, the gold has run out, or there is nothing left up
+— and searching again would find the same nothing. **Skip** still means skip: a
+reagent you leave is not gone back for.
+
+Because bought items go to the **post, not your bags**, the shortfall the
+shopping list works out cannot see anything this run has already bought. Each
+pass subtracts what is already in the mail, so going back for the last 30 never
+sets out to buy all 75 again.
+
+The report says `45 of 75` in orange whenever the two differ, with the number of
+tries beside it — a bare count reads as success, and a shortfall you cannot see
+is one you find out about at the forge.
+
+This is the shopping run only. A **Buy** you drive by hand stops when its plan is
+filled and leaves the next move to you.
+
+#### Telling "about to spend" from "already spent"
+
+Three buttons in this addon commit gold — **BID**, **BUY**, **POST** — and all
+three work the same way: the addon lines a thing up, and the press is yours,
+because [the client won't allow otherwise](#why-bidding-needs-a-click). That
+makes the button the only place the difference can be shown, and it used to be
+shown by changing a number on an otherwise identical grey button. Press it twice
+out of habit and the second press bought another lot.
+
+So the states now look nothing like each other, and read the same on all three
+pages:
+
+| | Button | Line above it |
+| --- | --- | --- |
+| **Armed** | `>> BUY 12g 30s` in orange | *"This press spends 12g 30s"* |
+| **Working** | `finding...`, greyed | *"nothing is being bought this moment"* |
+| **Done** | `Bought 40` in green, **dead** | *"Done — bought 40 Lichbloom for 120g"* |
+| Ready to start | `Buy 40 for 120g`, plain | *"Nothing bought yet"* |
+
+The important one is **Done**. A finished purchase used to work out a fresh plan
+straight away and put it on the button — same place, same shape, same wording,
+differing only in a number. Now it leaves nothing armed: the button is disabled,
+and buying more takes a deliberate press of **Best mix**, a click on a listing,
+or a change to the quantity. Any of those clears the finished notice on the way
+through.
+
+The wording changes with the colour, not just the colour, and the disabled button
+does the real work — so none of this depends on telling orange from green.
+
+#### While it's running
+
+The top of the Buy tab says which reagent it's on, how far down the list it is,
+and how much of the budget is gone. Everything below is real — those are the
+listings and the plan for that reagent — you just didn't type it in.
+
+**Skip** leaves the reagent it's on and moves to the next. **Stop** ends the run
+and prints what it managed to buy. Searching for something yourself while a run
+is going is refused with a reason rather than quietly breaking it.
+
+#### Reagents it never touches
+
+Anything with **no price anywhere** is left out entirely and named before you
+approve the run. The whole protection here is "no more than the list said", and
+for something the list couldn't price there's no such figure to stay under —
+buying it would mean paying whatever is being asked, which is exactly what you
+wouldn't do by hand.
+
+**Vials** never appear either. They come off a vendor; there's nothing to buy.
+
+#### One thing to watch: the mailbox
+
+Auction purchases arrive **by post** on 3.3.5a, and the shopping list counts your
+bags. So a reagent you bought ten minutes ago and haven't collected still reads
+as missing, and a second run would go and buy it again.
+
+Within one run that can't happen — the list holds one entry per reagent, however
+many recipes wanted it. Between runs it can, so anything the last run bought that
+still shows as missing is named before you approve another one. It's named rather
+than deducted: what's in the post isn't knowable from here.
+
+**Collect your mail before pressing it twice.**
+
+#### It still needs your clicks
+
+WoW only honours a purchase while it's handling a real click, so a run is one
+press per page of results — the same as buying one item by hand. Everything
+between the presses is done for you; the presses are yours. See
+[Why bidding needs a click](#why-bidding-needs-a-click).
+
+---
+
+## Training: the cheapest way to level
+
+The **Training** tab answers one question and doesn't pretend to answer any
+other: **which recipe gets my skill up for the least gold?**
+
+| Column | Is |
+| --- | --- |
+| *(the name)* | Painted your tradeskill window's colour for it |
+| **Can make** | How many your bags already cover |
+| **Mats cost** | What one craft's reagents cost on the auction house |
+| **Points** | Expected skill points from one craft |
+| **Per point** | Mats ÷ points — **the headline, sorted cheapest first** |
+
+So the top row is the cheapest way to level right now. Grey recipes are hidden by
+default; they can't teach you anything.
+
+**What the item is worth is deliberately absent.** You're not making these to
+sell them, you're making them to get a number up. Netting the product's value off
+the cost would flatter recipes that happen to be sellable over the ones that are
+actually cheapest to train on — which is exactly the wrong ranking. If you want
+to know what something earns, that's what the Profit page is for, and a
+profession can be on both.
+
+### Points, and how much to trust them
+
+`Points` is how many skill points one craft is expected to give: `1` at orange,
+`0.75` at yellow, `0.25` at green, nothing at grey, multiplied by the client's
+own `numSkillUps` (which is 1 for nearly everything).
+
+Those chances are the standard approximation — the client doesn't publish the
+real curve. They're exactly good enough for the job they have, which is ranking
+recipes against each other, and not good enough to promise how many Borean
+Leather a particular point will take. Treat `Per point` as a comparison, not a
+budget.
+
+A recipe with an unpriced reagent shows `?` rather than a cheap-looking number: a
+missing reagent counted as free would come out as the cheapest way in the game to
+level, when it's only the one we know least about.
+
+### Everything the window makes, not a chosen slice
+
+Leatherworking keeps every recipe its window offers — leg armours, armour kits,
+bags, drums, gear, and the intermediate leather half of it is built from.
+
+That matters most for levelling. What's cheapest to train on is very often an
+intermediate or a plain piece of armour nobody would ever buy, and a filter that
+kept only the saleable things would hide exactly the rows someone working up
+through the ranks needs to see.
+
+### Thread and salt are counted, never costed
+
+The same rule the vials get. Reagents that come off the leatherworking supply
+vendor are left out of every cost — a trip to a vendor is not an auction house
+decision, and pricing it would only muddy what a craft is really worth — but they
+are still counted, and they get their own line on the shopping list so you leave
+knowing how many to pick up.
+
+Built in: the six threads (Coarse, Fine, Silken, Heavy Silken, Rune, Eternium) and
+Salt. Nothing else. There is no API that says "a vendor sells this", so this is a
+list, and it errs deliberately towards charging you: anything not on it is treated
+as something you buy from other players. Getting it wrong the other way would call
+an auction house item free and put the wrong recipe at the top of the page.
+
+The dyes are deliberately off it — vendor goods in most of the world, but also
+traded, and far more a tailoring reagent than a leatherworking one.
+
+#### If your realm disagrees
+
+`/snipe vendor <item name>` toggles any reagent, and your answer beats the built-in
+list in both directions:
+
+```
+/snipe vendor Eternium Thread     -- now costed like anything else you buy
+/snipe vendor Black Dye           -- now treated as vendor stock, left out of costs
+/snipe vendor                     -- list the corrections you've made
+```
+
+Spell it as the game spells it — the name is matched exactly, and it's told you if
+nothing on file uses it. It applies to both professions, because an item is either
+on a vendor's shelf or it isn't.
+
+### The colour of a recipe name
+
+Recipe names are painted the same colour your tradeskill window paints them,
+meaning the same thing:
+
+| Name | Difficulty | Making one |
+| --- | --- | --- |
+| Orange | optimal | Almost always a skill point |
+| Yellow | medium | Usually a skill point |
+| Green | easy | Sometimes a skill point |
+| Grey | trivial | Never a skill point |
+
+A name in plain **white** has no difficulty recorded yet — open the profession
+once and it fills in. White is not grey, and isn't allowed to look like it.
+
+Because the name carries this now, the estimate marker moved onto the money: a
+**`~`** before a price means it's an estimate rather than a figure from the last
+scan. That's the more honest place for it anyway — a recipe isn't an estimate,
+its price is.
+
+The **Training** page hides grey recipes from the start. **Profit** shows
+everything. Either way the tick box top right — **only what can still level me** —
+overrides it, and is remembered per page, so a profession open in both modes can
+be filtered in one and not the other. The count at the bottom right says how many
+it hid.
+
+It's a filter on your eyes and nothing else. A hidden recipe is still costed,
+still holds whatever you typed into **Want**, and is still bought by a shopping
+run — quietly dropping something you'd asked for forty of, because it had stopped
+levelling you, would be far worse than showing it.
+
+The colours are on the Profit page too — a recipe that still levels you is worth
+knowing about even when you're making it for the money.
+
+#### Where the colours come from
+
+`GetTradeSkillInfo` returns the difficulty as its second value — `optimal`,
+`medium`, `easy` or `trivial` — the same string the default UI colours its own
+list by. BidSniper was already reading it to tell a header from a recipe, so this
+costs nothing and needs no lookup table of item levels or skill ranges.
+
+Two things follow from that:
+
+* **It's a snapshot**, taken the last time that tradeskill window was open. It
+  goes stale in one direction only — skill goes up, so a recipe recorded as
+  orange might be yellow by now, never the other way round. That means the error
+  always runs towards showing you something that no longer levels you, and never
+  towards hiding one that would. Opening the profession again brings it up to
+  date.
+* **Recipes read before this existed have no colour**, so their names stay white
+  and they are never hidden. Not knowing whether something would level you isn't the same
+  as knowing it wouldn't. Open the window once and they fill in.
+
+The colours are Blizzard's own values. If `Blizzard_TradeSkillUI` has been loaded
+this session its live `TradeSkillTypeColor` table is used instead, so a client
+that recoloured them stays consistent with itself.
+
+`/snipe crafts` and `/snipe crafts leather` name the difficulty in words next to
+each recipe.
+
+### Adding a profession
+
+A profession is a table in `BidSniperCraft.lua`: which tradeskill window feeds
+it, which of the things that window makes are worth costing, which of its
+reagents come off a vendor, where its recipe book lives, and which modes it's
+offered in.
+
+```lua
+AddProfession{
+    id         = "tailoring",
+    label      = "Tailoring",          -- the selector button
+    title      = "Tailoring",
+    window     = "tailoring",
+    makes      = "tailoring",
+    modes      = { profit = true, training = true },   -- both, or either
+    trade      = { ["Tailoring"] = true },
+    subTypes   = nil,                  -- nil = everything the window makes
+    recipesKey = "tailorRecipes",      -- its own book in BidSniperDB
+    wantKey    = "tailorWant",
+    vendor     = { ["Rune Thread"] = true },
+    vendorOne  = "vendor item",
+    vendorMany = "vendor items",
+}
+```
+
+That's the whole change. It gets a button on every mode it lists, its own recipe
+book, its own planned quantities, and it's picked up by scans, shopping runs and
+the vendor overrides without anything else being touched.
+
+A **mode** is a table in the same file: five column headings with their geometry,
+a function that fills those five cells for a recipe, a sort order, and what to
+put in the tooltip. Nothing in the page code knows the name of any profession,
+and nothing in a profession knows the name of any column — which is what keeps
+both lists open-ended.
+
+### The rest works the same
+
+Prices, the exact-or-estimate split, **Can make**, the **Want** column, the
+shopping list, the bank never being deducted, and **Buy the list** all behave
+exactly as described under [Crafting](#crafting). A shopping run started from a
+page shops for that page's recipes and no others — it remembers which page sent
+it, so switching tabs mid-run changes nothing. It also remembers the mode, so
+when the auction house can't supply enough, a run started from Training cuts back
+whatever levels you least cheaply rather than whatever sells worst.
+
+One scan prices both pages. A price is a fact about an item rather than about a
+profession, and Borean Leather costs what it costs whoever is asking, so the sweep
+you were running anyway fills in both books at once.
 
 ---
 
@@ -661,6 +1357,44 @@ The tooltip also shows profit after the 5% auction house cut.
 
 Prices are cached for a day so the column fills instantly on load; unknown
 prices are retried after ten minutes. `/snipe prices` forces a rebuild.
+
+### Where the number came from
+
+Three things can answer "what is one of these worth", and they answer from
+different moments:
+
+| Source | What it knows |
+| --- | --- |
+| **This addon's last scan** | The cheapest one it walked past. Freshest, but only covers what that sweep actually read |
+| **Auctionator's database** | The cheapest its last scan saw, for everything. Complete, but only moves when Auctionator scans |
+| **A remembered price** | Auctionator's answer from up to a day ago |
+
+Hovering a row says which of the three priced it, which is the first question
+worth asking whenever a Market figure disagrees with what Auctionator's own
+window shows for the same item.
+
+### Prices settle before anything is priced from them
+
+A scan repaints the list as it runs, and painting a row prices it — so a sweep
+used to finish with every row it found already carrying a Market and a Profit
+worked out from the prices held *before* it started, and never recompute them.
+The result was an addon that read forty thousand current prices and then showed
+you last week's.
+
+That order is now the other way round. When a scan ends:
+
+1. what it saw is committed as this addon's prices;
+2. every figure worked out from the old ones is thrown away, along with the
+   day-old cache entries the sweep has just outdated;
+3. Auctionator is handed the same dump and updates its own database from it;
+4. **then** the rows are priced and sorted.
+
+So the Market column and Auctionator's own window are looking at the same
+auction house rather than at two different afternoons. A scan that was stopped
+part way does the same with what it managed to read.
+
+`/snipe prices` still forces the whole lot to be worked out again, which is
+what to reach for after running Auctionator's scan by itself.
 
 ---
 
@@ -799,9 +1533,26 @@ have the next one ready the instant you click. That is what the BID button is.
 | `/snipe scan` | Start a complete new scan |
 | `/snipe resume` | Carry on from where a scan was interrupted |
 | `/snipe auto` \| `paged` \| `getall` \| `thorough` | Choose the scan method |
+| `/snipe piggyback` | Read another addon's full scan as if it were ours |
+| `/snipe atrsync` | Let Auctionator make our GetAll, so both update from it |
 | `/snipe buy` | Open the Buy tab |
 | `/snipe buy <item>` | Open it and search for that item straight away |
 | `/snipe buyplan` | Print what the current plan would buy, and for how much |
+| `/snipe shop` | Buy the whole shopping list — it drives the Buy tab for you |
+| `/snipe shoplist` | Print what a shopping run would buy, and for how much |
+| `/snipe shopmax <n>` | How far over the list price a run may go (default 20%) |
+| `/snipe shopstop` | End the shopping run that's going |
+| `/snipe shopped` | Print the report from the last shopping run again |
+| `/snipe craft` | Open the Profit tab (`/snipe profit` too) |
+| `/snipe training` | Open the Training tab (`/snipe level` too) |
+| `/snipe flasks` | Profit tab, on alchemy |
+| `/snipe leather` | Training tab, on leatherworking |
+| `/snipe recipes` | Read whatever tradeskill window is open into its own list |
+| `/snipe crafts` | Print the flask and elixir costings to chat |
+| `/snipe crafts leather` | Print the leatherworking costings to chat |
+| `/snipe vendor <item>` | Mark a reagent as vendor-bought, or list your corrections |
+| `/snipe sell` | Open the Sell tab |
+| `/snipe sellplan` | Print what that patch would post, and for how much |
 | `/snipe mybids` | Open the record of every bid you've placed |
 | `/snipe checkbids` | Fast check: your Bids tab and your mail, no AH queries |
 | `/snipe findbids` | Slow check: search the auction house itself |
@@ -831,6 +1582,22 @@ to a UI reload.
 Buy results are the exception: a search is live prices, and stale prices are
 worth nothing, so the listing table is not saved. The searches themselves are,
 under **Recent**.
+
+Each profession keeps its own recipe book and its own planned quantities; the
+harvested prices are shared, since a price is about an item rather than about a
+trade. Your `/snipe vendor` corrections are saved too, and outrank the built-in
+lists, as does the per-profession **only what can still level me** tick.
+
+A shopping run keeps only its margin setting. What a run bought is remembered for
+the session, so pressing **Buy the list** again can warn you about purchases
+still sitting in the post — but it goes at a reload, and after one the list
+counts your bags and nothing else.
+
+Sell keeps its bags and slot range, its undercut and duration, the market quotes
+from its last price check (for an hour, then dropped), and a **lot size per
+item**. The lot sizes are keyed by item name and shared by every character
+on the account, which is the point — how many Saronite Ore belong in one auction
+is a fact about the ore, not about who is holding it.
 
 Two things to know:
 
