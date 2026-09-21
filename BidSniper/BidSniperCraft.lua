@@ -119,11 +119,27 @@ AddProfession{
 		list is to leave the auction house knowing what else to go and buy.
 	]]
 	vendor = {
-		["Crystal Vial"] = true,
-		["Imbued Vial"]  = true,
-		["Leaded Vial"]  = true,
-		["Empty Vial"]   = true,
+		["Crystal Vial"]   = true,
+		["Imbued Vial"]    = true,
+		["Enchanted Vial"] = true,
+		["Leaded Vial"]    = true,
+		["Empty Vial"]     = true,
 	},
+	--[[
+		And every other vial, named or not.
+
+		A list of five was a list that had to be right, and it was not: Enchanted
+		Vial was missing, so the flasks that use it went to the auction house for
+		a container that costs a few silver off a shelf. The failure is silent
+		and it spends money, which is the worst combination a default can have.
+
+		A vial is a vial. They all come off the same alchemy supply vendor, they
+		always have, and matching the family rather than enumerating it means a
+		vial this addon has never heard of cannot cost anybody anything. The
+		names above stay because they say what is meant, and because /snipe
+		vendor still overrules either of them in both directions.
+	]]
+	vendorPattern = "[Vv]ial$",
 	vendorOne  = "vial",
 	vendorMany = "vials",
 }
@@ -570,12 +586,24 @@ BS.VendorReagents = BS.Professions.alchemy.vendor
 	thing you can see and we cannot - so what you set wins outright, in both
 	directions, rather than merely adding to the list.
 ]]
+-- what the built-in lists say, before any correction of yours
+function BS.ProfVendorItem(prof, name)
+	if not name or not prof then return false end
+	if prof.vendor and prof.vendor[name] then return true end
+	if prof.vendorPattern and string.find(name, prof.vendorPattern) then
+		return true
+	end
+	return false
+end
+
 function BS:IsVendorReagent(p, name)
+	if not name then return false end
+
 	local over = self.db and self.db.vendorExtra
 	if over and over[name] ~= nil then
 		return over[name] and true or false
 	end
-	return self:Prof(p).vendor[name] and true or false
+	return BS.ProfVendorItem(self:Prof(p), name)
 end
 
 function BS:SetVendorReagent(name, isVendor)
@@ -590,7 +618,7 @@ function BS:SetVendorReagent(name, isVendor)
 	]]
 	local builtin = false
 	for _, prof in ipairs(BS.ProfOrder) do
-		if prof.vendor[name] then builtin = true break end
+		if BS.ProfVendorItem(prof, name) then builtin = true break end
 	end
 
 	if isVendor == builtin then

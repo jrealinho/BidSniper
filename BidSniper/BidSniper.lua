@@ -3712,8 +3712,8 @@ SlashCmdList["BIDSNIPER"] = function(msg)
 		if BS:HasShop() then BS:SetShopOver(rest) else BS:NoShop() end
 	elseif msg == "shopmax" then
 		if BS:HasShop() then
-			BS:Print(format("Shopping runs pay at most |cffffd100%d%%|r over what the "
-				.. "list says. |cffffffff/snipe shopmax <n>|r changes it.", BS:ShopOver()))
+			BS:Print(format("Reagents count as fair up to |cffffd100%d%%|r over their usual price; the rest "
+				.. "needs a tick in the quote. |cffffffff/snipe shopmax <n>|r changes it.", BS:ShopOver()))
 		else
 			BS:NoShop()
 		end
@@ -3784,7 +3784,7 @@ SlashCmdList["BIDSNIPER"] = function(msg)
 		BS:Print("/snipe leather - the training page, on leatherworking")
 		BS:Print("/snipe shop - buy the whole shopping list: it drives the Buy tab for you")
 		BS:Print("/snipe shoplist - print what a shopping run would buy, and for how much")
-		BS:Print("/snipe shopmax <n> - how far over the list price a run may go (default 20%)")
+		BS:Print("/snipe shopmax <n> - how far over its usual price a reagent still counts as fair (default 20%)")
 		BS:Print("/snipe shopstop - end the shopping run that is going")
 		BS:Print("/snipe shopped - print the report from the last shopping run again")
 		BS:Print("/snipe sell - post a chosen patch of your bags to the auction house")

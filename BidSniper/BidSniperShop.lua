@@ -32,22 +32,17 @@
 	is one press per page of results, the same as buying one item by hand is,
 	and the button says what that press costs before you press it.
 
-	And it will not pay more than the list said. That is the whole safety of the
-	thing, so it is worth being exact about what the promise is:
+	And it will not spend more than you approved, and you approve an exact
+	figure. The first pass buys nothing and ends in a quote: every reagent at
+	the price somebody is really asking, for the quantity really up, with the
+	recipes already cut to what can be made. Anything more than your +% over its
+	usual price is shown separately and only bought if you tick it. You see the
+	total, and every shortage, before a copper moves.
 
-	  * the list quoted a price for each reagent, taken from the last scan;
-	  * a run will not pay more than that, plus a margin you set;
-	  * the margin is measured against the part of the purchase you actually
-	    needed, so a stack that overshoots is judged on the items you wanted
-	    rather than on the ones that came along with them;
-	  * anything dearer than that is left alone and said out loud, with both
-	    figures, so you can go and look at it yourself.
-
-	The consequence is that a run can come back having bought half the list.
-	That is the correct outcome and not a failure: prices move between the scan
-	and the shopping trip, and quietly paying triple for Frost Lotus because it
-	was on a list you approved ten minutes ago is the thing this is built to
-	stop.
+	After that the total is a ceiling that is never crossed. Each reagent is
+	held to the price the quote gave it; if one has gone up by the time it is
+	bought, it may rise by your +% only out of money another reagent came in
+	under, never out of what is set aside for the rest of the list.
 ]]
 
 local BS = BidSniper
@@ -79,7 +74,7 @@ end
 function BS:SetShopOver(n)
 	n = tonumber(n)
 	if not n then
-		self:Print("Give it a percentage - 0 means never pay a copper over the list.")
+		self:Print("Give it a percentage - 0 means only the usual price or less counts as fair.")
 		return
 	end
 
@@ -91,8 +86,8 @@ function BS:SetShopOver(n)
 	]]
 	n = max(0, min(200, floor(n)))
 	self:ShopSettings().over = n
-	self:Print(format("Shopping runs will pay at most |cffffd100%d%%|r over what the "
-		.. "list says.", n))
+	self:Print(format("Reagents now count as fair up to |cffffd100%d%%|r over their usual "
+		.. "price; anything dearer needs a tick in the quote.", n))
 	self:RefreshCraft()
 end
 
@@ -203,19 +198,6 @@ end
 --  starting one
 --=============================================================================
 
-StaticPopupDialogs["BIDSNIPER_CONFIRM_SHOP"] = {
-	text = "Buy the shopping list?\n\n%s\n\nIt will never spend more than %s, and it "
-	    .. "leaves any reagent that costs more than the list said.",
-	button1 = YES,
-	button2 = NO,
-	OnAccept = function(self) BidSniper:ShopBegin(self.data) end,
-	timeout = 60,
-	whileDead = 1,
-	hideOnEscape = 1,
-	showAlert = 1,
-	preferredIndex = 3,
-}
-
 --[[
 	`p` is the profession whose page pressed the button. A run is always about one
 	recipe book: the list it buys from, the solve that cuts it back when the
@@ -253,46 +235,34 @@ function BS:ShopStart(p, m)
 		return
 	end
 
-	-- a queue made up entirely of things that cannot be priced has nothing to
-	-- spend on, and a purchase run that cannot purchase is just a slow way of
-	-- reading the auction house
-	if #unpriced >= #queue then
-		self:Print(format("Nothing on the list can be costed: %s ha%s no price "
-			.. "anywhere, so there is no figure to keep a purchase under. Look %s up "
-			.. "on the Buy tab.", table.concat(unpriced, ", "),
-			#unpriced == 1 and "s" or "ve", #unpriced == 1 and "it" or "them"))
-		return
-	end
-
-	local budget = floor(est * (1 + self:ShopOver() / 100))
-
 	--[[
-		Said before the dialog rather than inside it. Each of these is worth
-		knowing and none of them is a reason to stop: a run buys what it can
-		afford and reports the rest, and a stack in the bank stays your call.
+		Said up front rather than in the quote. Each of these is worth knowing
+		and none of them is a reason to stop: a stack in the bank stays your
+		call, and parcels still in the post are the one thing that can have a
+		run buy something twice.
 	]]
 	self:ShopWarnUncollected(queue)
-	if #unpriced > 0 then
-		self:Print(format("|cffff8800Will not buy %s|r - no price anywhere, so there "
-			.. "is nothing to check a purchase against. It still gets looked up, "
-			.. "because what is for sale decides how many of the rest are worth "
-			.. "buying.", table.concat(unpriced, ", ")))
-	end
 	if banked > 0 then
 		self:Print(format("|cff777777%d of what you are short of is sitting in your "
 			.. "bank. The list never deducts it, and neither does this.|r", banked))
 	end
-	if GetMoney() < est then
-		self:Print(format("|cffff8800The list comes to about %s and you have %s.|r It "
-			.. "will buy down the list until the gold runs out and say what it left.",
-			BS.Money(est), BS.Money(GetMoney())))
-	end
 
-	StaticPopup_Show("BIDSNIPER_CONFIRM_SHOP",
-		format("%d reagent%s, about %s", #queue, #queue == 1 and "" or "s", BS.Money(est)),
-		BS.Money(budget),
-		{ queue = queue, est = est, budget = budget, unpriced = unpriced,
-		  prof = p.id, mode = m.id })
+	--[[
+		Straight into pricing, with no question first.
+
+		There used to be a dialog here asking you to approve a total, and the
+		total was a guess: the last scan's price for each reagent, times what
+		you were short. The real answer - what is actually for sale, at what,
+		and whether there is enough of it - only arrived afterwards, one
+		reagent at a time, and the first you heard of a shortage or a price
+		that had tripled was the report at the end.
+
+		So the question moves to where the answer is. Pricing buys nothing, so
+		it needs no permission; the approval comes once every reagent has been
+		looked at, against the exact figure it will cost.
+	]]
+	self:ShopBegin({ queue = queue, est = est, unpriced = unpriced,
+	                 prof = p.id, mode = m.id })
 end
 
 function BS:ShopBegin(plan)
@@ -324,6 +294,24 @@ function BS:ShopBegin(plan)
 	local wants, origWants = {}, {}
 	for k, v in pairs(self:Wants(plan.prof)) do wants[k] = v origWants[k] = v end
 
+	--[[
+		The crafts, as a list you can edit in the quote.
+
+		In the Profit tab's own order, so the quote reads the way the page you
+		pressed the button on reads. `sel` is how many of each to make and `off`
+		is what you have unticked - both belong to this run alone. Your Want
+		column is where they start and it is never written back to.
+	]]
+	local crafts, sel = {}, {}
+	local recipes = self:Recipes(plan.prof)
+	for _, c in ipairs(self:Costed(plan.prof)) do
+		local want = origWants[c.name]
+		if want and want > 0 and recipes[c.name] then
+			crafts[#crafts + 1] = { name = c.name, link = c.link, want = want }
+			sel[c.name] = want
+		end
+	end
+
 	self.shopRun = {
 		-- Which page sent it, carried for the whole run. Every list, solve and
 		-- report below is about one profession's recipes, and the tab you are
@@ -336,7 +324,8 @@ function BS:ShopBegin(plan)
 		at       = 0,
 		phase    = "survey",		-- look at all of it before buying any of it
 		est      = plan.est,
-		budget   = plan.budget,
+		-- set when you approve the quote, and never spent past after that
+		budget   = 0,
 		unpriced = plan.unpriced or {},
 		over     = self:ShopOver(),
 		spent    = 0,
@@ -347,6 +336,11 @@ function BS:ShopBegin(plan)
 		-- time, so a recipe can be cut and later restored when something else
 		-- turns out to have freed the reagent it was waiting on
 		origWants = origWants,
+		crafts    = crafts,
+		sel       = sel,
+		off       = {},
+		sellPrice = {},		-- craft -> what one of it sells for, and where that came from
+		pat       = 0,
 		capped   = {},		-- recipe -> { from, to, why }, in the order they were cut
 		started  = time(),
 	}
@@ -355,10 +349,11 @@ function BS:ShopBegin(plan)
 	if self.frame then self.frame:Show() end
 	self:SetTab("buy")
 
-	self:Print(format("Checking %d reagent%s before buying anything. It will not spend "
-		.. "more than %s, and will leave anything dearer than %d%% over the list.",
-		#plan.queue, #plan.queue == 1 and "" or "s", BS.Money(plan.budget),
-		self.shopRun.over))
+	local nCrafts = #crafts
+	self:Print(format("Pricing %d reagent%s, and what %d craft%s sell%s for. "
+		.. "|cffffffffNothing is bought|r until you have seen the exact total and approved it.",
+		#plan.queue, #plan.queue == 1 and "" or "s",
+		nCrafts, nCrafts == 1 and "" or "s", nCrafts == 1 and "s" or ""))
 
 	self:ShopNext()
 end
@@ -402,6 +397,53 @@ end
 -- actually stopped it, and anything after that is a consequence of it.
 local function Note(item, why)
 	if item and not item.why then item.why = why end
+end
+
+--[[
+	Why a purchase ended, in words that follow a reagent's name.
+
+	The Buy page states its reasons as sentences for its own status line -
+	"3 auctions could not be found - gone, or bought by somebody else." - and
+	those are the right words, just in the wrong case for the middle of a line.
+	"Bought everything the plan asked for" is not a reason anything came up
+	short, so it is not offered as one.
+]]
+local function StopReasonText(run)
+	local r = run and run.stopReason
+	if type(r) ~= "string" or r == "" then return nil end
+	if string.find(r, "^Bought everything") then return nil end
+	r = string.gsub(r, "%.%s*$", "")
+	return string.lower(string.sub(r, 1, 1)) .. string.sub(r, 2)
+end
+
+--[[
+	What the quote said it would cost to get at least `q` of a reagent, and how
+	many that actually delivers.
+
+	The survey keeps the planner's whole price table for each reagent rather than
+	one figure, because the quantity you end up buying is not known until the
+	plan is solved - and knapsack prices do not scale: forty out of a sixty-stack
+	costs the whole stack, and half of forty is not half the gold. The table
+	answers any quantity exactly. Its entries rise in both columns, so the first
+	one that reaches `q` is the cheapest way to get there.
+
+	nil means the quote never saw that many for sale.
+]]
+-- a profit, coloured the way the Profit tab colours one
+local function MoneySigned(c)
+	c = c or 0
+	if c >= 0 then return "|cff40ff40+" .. BS.MoneyPlain(c) .. "|r" end
+	return "|cffff4444-" .. BS.MoneyPlain(-c) .. "|r"
+end
+
+local function QuotedCost(item, q)
+	if not q or q <= 0 then return 0, 0 end
+	local opts = item and item.options
+	if not opts then return nil end
+	for _, o in ipairs(opts) do
+		if o.n >= q then return o.cost, o.n end
+	end
+	return nil
 end
 
 --=============================================================================
@@ -452,6 +494,77 @@ function BS:ShopAfford(item, need)
 end
 
 --[[
+	How much this reagent may spend without touching anybody else's share.
+
+	Everything still to come keeps the amount the quote gave it. What is left
+	over after that - this reagent's own quote, plus whatever the ones already
+	bought came in under - is this one's to use. So a price that crept up between
+	the quote and the purchase can be covered out of savings, and never out of
+	the gold set aside for the flask reagents further down the list.
+
+	Because the budget is the quoted total, what this returns can never take
+	the run past what you approved.
+]]
+function BS:ShopAllowance(current)
+	local shop = self.shopRun
+	if not shop then return 0 end
+
+	local reserve = 0
+	for i = (shop.at or 0) + 1, #shop.queue do
+		local it = shop.queue[i]
+		if it ~= current then reserve = reserve + (it.quoteCost or 0) end
+	end
+	return (shop.budget or 0) - (shop.spent or 0) - reserve
+end
+
+--[[
+	The most of `need` that can be bought now without breaking the quote.
+
+	Judged quantity by quantity against the quote's own price table, not against
+	an average: a reagent quoted as one cheap stack is not allowed to become a
+	pile of dear singles just because the total happens to fit. Each quantity
+	may cost up to its quoted price plus your +%, and never more than the
+	allowance above.
+
+	Only the quantities where one of the two tables changes can be the answer -
+	between those both prices are flat - so those are the only ones tried,
+	largest first.
+]]
+function BS:ShopAffordQuoted(item, need)
+	local d = self.buyDP
+	if not d or not d.options or #d.options == 0 then return 0, nil end
+
+	-- never past what you approved for it, counting what earlier passes got
+	local limit = min(need or 0, (item.quoteQty or 0) - (item.got or 0))
+	if limit > (d.maxq or 0) then limit = d.maxq or 0 end
+	if limit <= 0 then return 0, nil end
+
+	local tol       = 1 + (self.shopRun.over / 100)
+	local allowance = self:ShopAllowance(item)
+
+	local cands, seen = { limit }, { [limit] = true }
+	local function add(n)
+		if n and n > 0 and n < limit and not seen[n] then
+			seen[n] = true
+			cands[#cands + 1] = n
+		end
+	end
+	for _, o in ipairs(d.options) do add(o.n) end
+	for _, o in ipairs(item.options or {}) do add(o.n) end
+	table.sort(cands, function(x, y) return x > y end)
+
+	for _, n in ipairs(cands) do
+		local fresh  = d.dp[n]
+		local quoted = QuotedCost(item, n)
+		if fresh and fresh < math.huge and quoted
+		   and fresh <= quoted * tol and fresh <= allowance then
+			return n, fresh
+		end
+	end
+	return 0, nil
+end
+
+--[[
 	A search has come back during the survey. Write down what it found.
 
 	The listings themselves are kept, not just the number. The buying pass needs
@@ -466,42 +579,41 @@ function BS:ShopSurveyed()
 	if not shop then return end
 
 	local item = shop.queue[shop.at]
-	if not item then self:ShopSolve() return end
+	if not item then self:ShopProductsBegin() return end
 
-	local plan = self.buyPlan
+	local plan, d = self.buyPlan, self.buyDP
+	item.forSale    = (self.buy and self.buy.total) or 0
+	-- what you were short of before anything was cut or bought; the buying
+	-- pass reuses `need` for each purchase, and the report needs the original
+	item.surveyNeed = item.need
 
-	if not self.buy or not plan or #plan.lines == 0 or (plan.qty or 0) <= 0 then
-		item.avail = 0
-		Note(item, "nobody is selling it")
-
-	elseif item.noPrice then
-		--[[
-			Looked up so the plan could be cut to fit, never to be bought. There
-			is no quoted price to hold this one to, so what is for sale is
-			information and nothing more - and since none of it is coming, none
-			of it counts towards what can be made.
-		]]
-		item.avail = 0
-		item.forSale = plan.qty
-		Note(item, format("%s up, but no price on file to check a purchase against",
-			BS.Comma(plan.qty)))
-
+	if not self.buy or not plan or not d or #plan.lines == 0 or (plan.qty or 0) <= 0 then
+		item.options, item.fairQty, item.maxQty = nil, 0, 0
 	else
-		local afford, cost = self:ShopAfford(item, item.need)
-		item.avail    = afford
-		item.planCost = cost
-		item.forSale  = self.buy.total
+		--[[
+			Three numbers, and no decision. Whether to buy the dear part is
+			yours to make in the quote, so the survey only writes down what it
+			would take:
 
-		if afford <= 0 then
-			Note(item, format("%s up, all dearer than the %s the list said",
-				BS.Comma(self.buy.total or 0), BS.Money(item.unit)))
-		elseif afford < item.need then
-			Note(item, format("only %s of the %s could be had at a fair price",
-				BS.Comma(afford), BS.Comma(item.need)))
+			  * `options` - the exact cost of every quantity on offer;
+			  * `fairQty` - how many of what you are short of can be had within
+			    your +% of the usual price;
+			  * `maxQty`  - how many can be had at all, whatever they cost.
+		]]
+		item.options = d.options
+		local top    = d.options[#d.options]
+		item.maxQty  = top and min(item.need, top.n) or 0
+
+		if item.noPrice then
+			-- no usual price means nothing counts as fair: every one is a choice
+			item.fairQty = 0
+		else
+			item.fairQty = min(item.need, (self:ShopAfford(item, item.need)) or 0)
 		end
-
 	end
 
+	item.accept = false
+	item.avail  = item.fairQty
 	self:ShopNext()
 end
 
@@ -534,8 +646,498 @@ function BS:ShopSolve()
 		is one your bags already covered, or a vial off a vendor, and neither is
 		a limit on how many you can make.
 	]]
-	self:ShopApplySolve()
-	self:ShopAnnounce()
+	shop.phase    = "quote"
+	shop.quotedAt = time()
+
+	local q = self:ShopQuote()
+	self:Print(format("|cffffd100Quote ready:|r spend |cffffffff%s|r, expected profit %s. "
+		.. "Nothing has been bought - untick anything you would rather not make, then "
+		.. "approve or cancel in the window.", BS.Money(q.total), MoneySigned(q.profit)))
+
+	if self.ShowShopQuote then
+		self:ShowShopQuote()
+	else
+		self:PrintShopQuote(q)
+	end
+	self:RefreshBuy()
+end
+
+--=============================================================================
+--  the quote
+--=============================================================================
+
+--[[
+	What the whole list costs, exactly, with your choices applied.
+
+	Worked out from the survey rather than from the last scan: every price here
+	is one somebody is asking right now, for a quantity that is really up. And
+	the plan is solved before it is priced, so a shortage in one reagent has
+	already cut the recipes it caps - and with them the other reagents those
+	recipes would have used - before any of it is added up. The total is the
+	total for the flasks you can actually make, not for the ones you typed.
+
+	`accept` is the one thing you can change. Each reagent can supply its fair
+	part, or everything that is up; ticking it in the window moves it from one
+	to the other, and because that can give a recipe its numbers back, the whole
+	thing is solved again rather than one line adjusted.
+]]
+function BS:ShopQuote()
+	local shop = self.shopRun
+	if not shop then return nil end
+
+	local function usable(item)
+		return item.accept and (item.maxQty or 0) or (item.fairQty or 0)
+	end
+
+	local supply = {}
+	for _, item in ipairs(shop.queue) do
+		local bags, bank = BS.ReagentHave(item)
+		supply[item.name] = (bags or 0) + (bank or 0) + usable(item)
+	end
+
+	-- solved from what you left ticked in the quote rather than from the Want
+	-- column: untick a craft and its reagents stop being bought, which is the point
+	local wants, changes = self:SolveWants(shop.prof, self:ShopSelectedWants(shop),
+		supply, shop.mode)
+	local list, vendor   = self:ShoppingList(shop.prof, wants)
+	local short = {}
+	for _, e in ipairs(list) do short[e.name] = e.short or 0 end
+
+	local q = { total = 0, rows = {}, changes = changes, wants = wants,
+	            vendor = vendor or {}, shortAny = false }
+
+	for _, item in ipairs(shop.queue) do
+		local need = short[item.name] or 0
+		local take = min(need, usable(item))
+		local cost, gets = QuotedCost(item, take)
+		if not cost then take, cost, gets = 0, 0, 0 end
+
+		-- the choice, measured on the reagent's own numbers so it never depends
+		-- on the choice itself: unticking something must not hide its tick box
+		local fairCost = QuotedCost(item, item.fairQty or 0) or 0
+		local fullCost = QuotedCost(item, item.maxQty or 0) or 0
+		local extra    = max(0, (item.maxQty or 0) - (item.fairQty or 0))
+
+		local row = {
+			item = item, need = need, take = take, cost = cost, gets = gets,
+			canTick   = (not item.searchFailed) and extra > 0,
+			extraQty  = extra,
+			extraCost = max(0, fullCost - fairCost),
+		}
+
+		if item.unit and item.unit > 0 and (item.maxQty or 0) > 0 then
+			row.overPct = floor((fullCost / (item.unit * item.maxQty) - 1) * 100 + 0.5)
+		end
+
+		--[[
+			One short phrase per row, worked out here so the window and the chat
+			version say exactly the same thing. `tone` is how loud to say it.
+		]]
+		local over = shop.over
+		if item.searchFailed then
+			row.note, row.tone = "could not be looked up", "bad"
+		elseif (item.forSale or 0) <= 0 then
+			row.note, row.tone = "nobody is selling it", "bad"
+		elseif need <= 0 then
+			row.note, row.tone = "not needed - its recipe was cut back", "dim"
+		elseif take < need then
+			if row.canTick and not item.accept then
+				row.note = item.noPrice
+					and "no usual price on file - tick to buy at market"
+					or  format("%d more cost over +%d%% - tick to buy them",
+						min(extra, need - take), over)
+			else
+				row.note = format("only %d for sale", take)
+			end
+			row.tone = "warn"
+		elseif item.accept and item.noPrice then
+			row.note, row.tone = "at market price - no usual price to compare", "warn"
+		elseif item.accept and take > (item.fairQty or 0) then
+			row.note = format("includes %d over your +%d%%", take - (item.fairQty or 0), over)
+			row.tone = "warn"
+		else
+			row.note, row.tone = "fair price", "good"
+		end
+
+		if take < need then q.shortAny = true end
+		q.total = q.total + cost
+		q.rows[#q.rows + 1] = row
+	end
+
+	--[[
+		What each craft costs and earns, priced from this run's own purchases.
+
+		A reagent's price is the average of everything the run buys of it, across
+		every craft that uses it - blended with what your bags already hold, at its
+		usual price. That is what makes the quote a filter rather than a bill. The
+		planner takes the cheapest auctions first, so the more of a shared reagent
+		you buy the dearer the last of it gets, and that cost lands on *every* craft
+		using it. Untick one, and the dearest auctions drop out of the plan: the
+		average falls, and the crafts you kept earn more.
+
+		The whole of an auction's cost is carried by the items you needed out of
+		it. A stack bought for its first fifteen costs what it costs, and the
+		spares are yours - but a craft is only worth making if it pays for the
+		stack it made you buy.
+	]]
+	local queueByName, rowByName = {}, {}
+	for _, item in ipairs(shop.queue) do queueByName[item.name] = item end
+	for _, row in ipairs(q.rows) do
+		rowByName[row.item.name] = row
+		row.paidEach = (row.take > 0) and (row.cost / row.take) or nil
+	end
+
+	local avg = {}
+	for _, e in ipairs(list) do
+		local total = e.total or 0
+		if total > 0 then
+			local row  = rowByName[e.name]
+			local take = row and row.take or 0
+			local paid = row and row.cost or 0
+			local rest = total - take
+			if rest <= 0 then
+				if take > 0 then avg[e.name] = paid / take end
+			else
+				local restUnit = e.unit or ((take > 0) and (paid / take)) or nil
+				if restUnit then avg[e.name] = (paid + rest * restUnit) / total end
+			end
+		end
+	end
+	for _, e in ipairs(vendor or {}) do avg[e.name] = 0 end
+
+	--[[
+		A reagent this plan is not using - it belongs only to crafts you have
+		unticked, or cut to nothing. Priced at what the check saw it would cost to
+		make those crafts, so an unticked row still says what it would have earned
+		and you can tell whether it is worth ticking again.
+	]]
+	local function reagentUnit(reagent, count)
+		local u = avg[reagent.name]
+		if u then return u, "blend" end
+		if self:IsVendorReagent(shop.prof, reagent.name) then return 0, "vendor" end
+		local item = queueByName[reagent.name]
+		if item and item.options and #item.options > 0 then
+			local n    = max(1, (reagent.need or 1) * max(1, count))
+			local cost = QuotedCost(item, n)
+			if cost then return cost / n, "live" end
+			local top = item.options[#item.options]
+			return top.cost / top.n, "live"
+		end
+		return self:UnitPrice(reagent.name, reagent.link), "scan"
+	end
+
+	local costed, recipes, cutBy = {}, self:Recipes(shop.prof), {}
+	for _, c in ipairs(self:Costed(shop.prof)) do costed[c.name] = c end
+	for _, ch in ipairs(changes) do cutBy[ch.name] = ch.why end
+
+	q.crafts, q.profit, q.unknown = {}, 0, 0
+	for _, craft in ipairs(shop.crafts or {}) do
+		local r      = recipes[craft.name]
+		local cc     = costed[craft.name]
+		local on     = not shop.off[craft.name]
+		local chosen = on and (shop.sel[craft.name] or 0) or 0
+		local making = wants[craft.name] or 0
+		local count  = (making > 0) and making or max(1, shop.sel[craft.name] or craft.want or 1)
+
+		local row = {
+			name = craft.name, link = craft.link, want = craft.want,
+			on = on, chosen = chosen, making = making, cutBy = cutBy[craft.name],
+			each = 0, lines = {}, sp = shop.sellPrice and shop.sellPrice[craft.name],
+		}
+
+		for _, reagent in ipairs((r and r.reagents) or {}) do
+			local u, how = reagentUnit(reagent, count)
+			row.lines[#row.lines + 1] = { name = reagent.name, link = reagent.link,
+			                              need = reagent.need or 0, unit = u, how = how }
+			if u then
+				row.each = row.each + u * (reagent.need or 0)
+			else
+				row.missing = true
+			end
+		end
+
+		row.yield = (cc and cc.yield)
+			or (r and ((r.minMade or 1) + (r.maxMade or r.minMade or 1)) / 2) or 1
+		if row.sp and row.sp.unit then row.sell = row.sp.unit * row.yield end
+
+		if row.sell and not row.missing then
+			row.profitEach   = row.sell - row.each
+			row.afterCutEach = row.sell * 0.95 - row.each
+			if making > 0 then
+				row.profit = making * row.profitEach
+				q.profit   = q.profit + row.profit
+			end
+		elseif making > 0 then
+			q.unknown = q.unknown + 1
+		end
+
+		q.crafts[#q.crafts + 1] = row
+	end
+
+	return q
+end
+
+function BS:ShopToggleAccept(item)
+	local shop = self.shopRun
+	if not shop or shop.phase ~= "quote" or not item then return end
+	item.accept = not item.accept
+	if self.RefreshShopQuote then self:RefreshShopQuote() end
+end
+
+-- how many of each craft the quote is for, after your ticks and numbers
+function BS:ShopSelectedWants(shop)
+	local w = {}
+	for _, c in ipairs((shop and shop.crafts) or {}) do
+		local n = shop.off[c.name] and 0 or (shop.sel[c.name] or 0)
+		if n > 0 then w[c.name] = n end
+	end
+	return w
+end
+
+function BS:ShopToggleCraft(name)
+	local shop = self.shopRun
+	if not shop or shop.phase ~= "quote" or not name then return end
+	shop.off[name] = (not shop.off[name]) or nil
+	if self.RefreshShopQuote then self:RefreshShopQuote() end
+end
+
+--[[
+	Make fewer of a craft than the Want column says.
+
+	Never more: the price check looked for enough reagents for what you asked
+	for and no further, so a bigger number would be priced against auctions
+	nobody has looked at.
+]]
+function BS:ShopSetCraft(name, n)
+	local shop = self.shopRun
+	if not shop or shop.phase ~= "quote" or not name then return end
+	local want = 0
+	for _, c in ipairs(shop.crafts or {}) do
+		if c.name == name then want = c.want end
+	end
+	shop.sel[name] = max(0, min(want, floor(tonumber(n) or 0)))
+	if self.RefreshShopQuote then self:RefreshShopQuote() end
+end
+
+--=============================================================================
+--  what the crafts sell for
+--=============================================================================
+
+--[[
+	After the reagents, the other half of the profit: what each finished craft
+	sells for.
+
+	The same price the Sell tab would post at - the cheapest listing the rest of
+	the market agrees with, giveaways ignored and your own auctions not counted -
+	because that is the price you are actually going to get. And the same rule
+	about asking: a price checked or scanned within the hour is used as it
+	stands, so a run straight after a scan does not search for anything twice.
+	What it does search is saved, so the Sell tab has it too.
+]]
+function BS:ShopProductsBegin()
+	local shop = self.shopRun
+	if not shop then return end
+	shop.phase = "products"
+	shop.pat   = 0
+	self:ShopProductNext()
+end
+
+-- a price for a craft from anything but a fresh look
+function BS:ShopProductFallback(c, why)
+	local shop = self.shopRun
+	if not shop or not c then return end
+	local unit = self:UnitPrice(c.name, c.link)
+	if unit then
+		shop.sellPrice[c.name] = { unit = unit, src = "lastscan", why = why }
+	else
+		shop.sellPrice[c.name] = { none = true, why = why or "no price on file anywhere" }
+	end
+end
+
+function BS:ShopProductNext()
+	local shop = self.shopRun
+	if not shop then return end
+
+	-- a loop, for the same reason the reagent walk is one: a price already in
+	-- hand costs no round trip, and a list of them would otherwise nest
+	while true do
+		shop.pat = (shop.pat or 0) + 1
+		local c = shop.crafts[shop.pat]
+		if not c then
+			self:ShopSolve()
+			return
+		end
+
+		local known = self.SellQuote and self:SellQuote(c.name)
+		if known and known.unit then
+			shop.sellPrice[c.name] = {
+				unit = known.unit, src = (known.src == "scan") and "scan" or "check",
+				rivals = known.rivals, dropped = known.dropped, partial = known.partial,
+			}
+		elseif known and known.none then
+			self:ShopProductFallback(c, "nobody else is selling it")
+		else
+			local fromScan = self.SellScanQuote and self:SellScanQuote(c.name)
+			if fromScan and fromScan.unit then
+				shop.sellPrice[c.name] = {
+					unit = fromScan.unit, src = "scan",
+					rivals = fromScan.rivals, dropped = fromScan.dropped,
+					partial = fromScan.partial,
+				}
+			else
+				self.buyTarget = 1
+				self:SetStatus(format("Pricing what you make %d/%d: %s...",
+					shop.pat, #shop.crafts, c.name))
+				if self:BuyStartSearch(c.name, true) then
+					self:RefreshBuy()
+					return
+				end
+				self:ShopProductFallback(c, "the search would not start")
+			end
+		end
+	end
+end
+
+-- results are in for the craft being priced
+function BS:ShopProductSeen()
+	local shop = self.shopRun
+	if not shop then return end
+
+	local c, b = shop.crafts[shop.pat], self.buy
+	if c then
+		local same = b and b.name and string.lower(b.name) == string.lower(c.name)
+		local q    = same and self.SellQuoteFrom and self:SellQuoteFrom(b.offers) or nil
+		local quotes = self.SellQuotes and self:SellQuotes()
+
+		if q then
+			shop.sellPrice[c.name] = { unit = q.unit, src = "search",
+			                           rivals = q.rivals, dropped = q.dropped }
+			if quotes then quotes[c.name] = q end
+		else
+			-- an answer too: written down so the Sell tab does not ask again
+			if same and quotes then
+				quotes[c.name] = { rivals = 0, dropped = 0, none = true, at = time() }
+			end
+			self:ShopProductFallback(c, "nobody else is selling it")
+		end
+	end
+	self:ShopProductNext()
+end
+
+-- the quote in chat, for when the window cannot be shown
+function BS:PrintShopQuote(q)
+	q = q or self:ShopQuote()
+	if not q then
+		self:Print("No quote to show - press Price & buy on a crafting page first.")
+		return
+	end
+	for _, row in ipairs(q.rows) do
+		self:Print(format("   %s  %s/%s  %s   |cff888888%s|r", row.item.link or row.item.name,
+			BS.Comma(row.take), BS.Comma(row.need), BS.Money(row.cost), row.note or ""))
+	end
+	for _, r in ipairs(q.crafts or {}) do
+		self:Print(format("   %s%s  making %s, reagents %s each, sells %s each  %s",
+			r.on and "" or "|cff777777(left out)|r ", r.link or r.name, BS.Comma(r.making),
+			r.missing and "?" or BS.Money(r.each), r.sell and BS.Money(r.sell) or "?",
+			r.profit and MoneySigned(r.profit) or ""))
+	end
+	self:Print(format("Spend |cffffffff%s|r, expected profit %s.", BS.Money(q.total),
+		MoneySigned(q.profit)))
+end
+
+--[[
+	You said yes. Fix the numbers and start spending.
+
+	Solved once more first, from the bags as they are now: a window can sit open
+	while you move things about, and the approval is for the list as it stands
+	when you press the button, not when the quote was drawn up.
+
+	From here the total is a ceiling that is never crossed. Each reagent keeps
+	its price table from the quote, and the buying pass holds every purchase to
+	it - see ShopAffordQuoted.
+]]
+function BS:ShopApprove()
+	local shop = self.shopRun
+	if not shop or shop.phase ~= "quote" then return end
+	if not self.atAH then
+		self:ShopStop("The auction house closed.")
+		return
+	end
+
+	local q = self:ShopQuote()
+	if q.total <= 0 then
+		self:ShopStop("Nothing to buy for the crafts left ticked.")
+		return
+	end
+
+	shop.budget     = q.total
+	shop.wants      = q.wants
+	shop.approvedAt = time()
+
+	--[[
+		What you chose in the quote becomes what the run is for. The buying pass
+		solves again before each purchase, and it has to solve from these numbers:
+		from the Want column it would quietly put back the crafts you left out.
+		What you originally asked for is kept, so the report can say what you
+		dropped rather than letting it look like a shortage.
+	]]
+	shop.askedWants = shop.origWants
+	shop.origWants  = self:ShopSelectedWants(shop)
+	shop.dropped    = {}
+	for _, c in ipairs(shop.crafts or {}) do
+		local kept = shop.origWants[c.name] or 0
+		if kept < c.want then
+			shop.dropped[#shop.dropped + 1] = { name = c.name, from = c.want, to = kept }
+		end
+	end
+	shop.expectedProfit = q.profit
+
+	-- recorded as already announced, so the first re-solve while buying does
+	-- not report the cuts you just approved as the market having moved
+	shop.capped, shop.shown = {}, {}
+	for _, ch in ipairs(q.changes) do
+		shop.capped[#shop.capped + 1] = {
+			name = ch.name, from = ch.from, to = ch.to,
+			why  = table.concat(ch.why, " and "),
+		}
+		shop.shown[ch.name] = ch.to
+	end
+
+	for _, row in ipairs(q.rows) do
+		local item = row.item
+		item.why       = nil		-- the survey's findings are superseded by the choice
+		item.want      = row.need
+		item.quoteQty  = row.take
+		item.quoteCost = row.cost
+		item.avail     = row.take
+
+		if row.take <= 0 then
+			if item.searchFailed then
+				Note(item, "could not be looked up")
+			elseif (item.forSale or 0) <= 0 then
+				Note(item, "nobody is selling it")
+			elseif row.need <= 0 then
+				Note(item, "not needed once the plan was cut back")
+			elseif item.noPrice then
+				Note(item, "no usual price on file, and you left it unticked")
+			else
+				Note(item, format("costs more than your +%d%% limit, and you left it "
+					.. "unticked", shop.over))
+			end
+		elseif row.take < row.need then
+			Note(item, (row.canTick and not item.accept)
+				and format("the other %d cost more than your +%d%% limit, and you left "
+					.. "them unticked", row.need - row.take, shop.over)
+				or  format("only %d were for sale", row.take))
+		end
+	end
+
+	if self.HideShopQuote then self:HideShopQuote() end
+	self:Print(format("|cff00ff00Approved %s|r, expected profit %s. It will not spend a "
+		.. "copper more than that.", BS.Money(q.total), MoneySigned(q.profit)))
+	if #shop.capped > 0 then
+		self:PrintCapped(shop, "|cffffd100Buying for these numbers:|r")
+	end
 	self:ShopBuyPhase()
 end
 
@@ -564,7 +1166,24 @@ function BS:ShopApplySolve()
 	for _, item in ipairs(shop.queue) do
 		if item.avail ~= nil then
 			local bags, bank = BS.ReagentHave(item)
+
+			--[[
+				And what this run has already bought, which is the one part of
+				your supply that nothing else here can see.
+
+				A buyout goes to the post, not to the bags, so `bags` reads the
+				same after buying forty Lichbloom as it did before. Leaving that
+				out made the solve believe the forty did not exist, and the
+				consequence was circular in the worst way: the reagent came up
+				short, so the recipes needing it were cut back, so the shortfall
+				stopped being a shortfall, so the run decided it had nothing
+				left to go back for - having just said it was going back.
+
+				That is exactly the sequence "40 of 52 - going back for the
+				other 12" followed by silence and a cut recipe.
+			]]
 			supply[item.name] = (bags or 0) + (bank or 0) + item.avail
+			                    + (item.got or 0)
 		end
 	end
 
@@ -697,7 +1316,7 @@ function BS:ShopNext()
 
 		if not item then
 			if shop.phase == "survey" then
-				self:ShopSolve()
+				self:ShopProductsBegin()
 			else
 				self:ShopStop("Shopping list finished.")
 			end
@@ -758,7 +1377,7 @@ function BS:ShopNext()
 
 			else
 				item.need = min(need, item.avail)
-				item.est  = item.unit * item.need
+				item.est  = QuotedCost(item, item.need) or 0
 
 				--[[
 					Searched again rather than bought off what the survey saw.
@@ -831,13 +1450,13 @@ function BS:ShopArm(item)
 		solved one now - and a quantity that changed is a plan that changed, so
 		it is checked rather than assumed.
 	]]
-	local useful  = min(plan.qty, item.need)
-	local quoted  = item.unit * useful
-	local ceiling = quoted * (1 + shop.over / 100)
+	local useful = min(plan.qty, item.need)
+	local quoted = QuotedCost(item, useful)
+	local cap    = quoted and min(quoted * (1 + shop.over / 100), self:ShopAllowance(item))
 
-	if plan.cost > ceiling then
-		Note(item, format("%s for %s, and the list said %s",
-			BS.Comma(plan.qty), BS.Money(plan.cost), BS.Money(quoted)))
+	if not cap or plan.cost > cap then
+		Note(item, format("%s now cost %s - the quote was %s",
+			BS.Comma(useful), BS.Money(plan.cost), BS.Money(quoted or 0)))
 		return false
 	end
 
@@ -895,6 +1514,8 @@ function BS:ShopSearchDone()
 	if not shop then return end
 	if shop.phase == "survey" then
 		self:ShopSurveyed()
+	elseif shop.phase == "products" then
+		self:ShopProductSeen()
 	else
 		self:ShopBuyReady()
 	end
@@ -926,7 +1547,7 @@ function BS:ShopBuyReady()
 	if not self.buy or not plan or (plan.qty or 0) <= 0 then
 		item.avail = 0
 	else
-		item.avail = self:ShopAfford(item, item.need)
+		item.avail = (self:ShopAffordQuoted(item, item.need))
 	end
 
 	local news = self:ShopApplySolve()
@@ -946,19 +1567,53 @@ function BS:ShopBuyReady()
 	if item.want == nil then item.want = need end
 	need = need - (item.got or 0)
 
+	--[[
+		Both of these can end a reagent we have just announced we were going
+		back for, and a promise that quietly evaporates is worse than one never
+		made. So a second pass says out loud why it stopped, rather than leaving
+		"going back for the other 12" as the last word on the subject and the
+		reason buried in the report at the end.
+	]]
 	if need <= 0 then
 		Note(item, "not needed once the plan was cut back")
+		if (item.passes or 1) > 1 then
+			self:Print(format("|cff888888%s: not going back after all - the plan came "
+				.. "down to what the reagents allow, and the %s already bought covers "
+				.. "it.|r", item.link or item.name, BS.Comma(item.got or 0)))
+		end
 		self:ShopNext()
 		return
 	end
 	if (item.avail or 0) <= 0 then
-		Note(item, "nothing worth buying was left by the time we got to it")
+		Note(item, "nothing left at the price the quote gave it")
+		if (item.passes or 1) > 1 then
+			self:Print(format("|cffff8800%s: nothing left worth buying - stopping at "
+				.. "%s of %s.|r", item.link or item.name,
+				BS.Comma(item.got or 0), BS.Comma(item.want or 0)))
+		end
 		self:ShopNext()
 		return
 	end
 
-	item.need = min(need, item.avail)
-	item.est  = item.unit * item.need
+	--[[
+		Asked again for the need as it now stands. A cut can shrink it, and the
+		price table is not smooth: the most of the old need that fitted is not
+		necessarily a quantity that fits the new one, so the new one is tested
+		on its own terms rather than clipped.
+	]]
+	local fits = self:ShopAffordQuoted(item, need)
+	if fits <= 0 then
+		Note(item, "costs more now than the quote said")
+		if (item.passes or 1) > 1 then
+			self:Print(format("|cffff8800%s: the rest now costs more than the quote - "
+				.. "stopping at %s.|r", item.link or item.name, BS.Comma(item.got or 0)))
+		end
+		self:ShopNext()
+		return
+	end
+
+	item.need = fits
+	item.est  = QuotedCost(item, fits) or 0
 
 	if not self:ShopArm(item) then self:ShopNext() end
 end
@@ -968,10 +1623,21 @@ function BS:ShopSearchFailed(reason)
 	local shop = self.shopRun
 	if not shop then return end
 
+	-- a craft's price check that never answered: fall back and carry on
+	if shop.phase == "products" then
+		self:ShopProductFallback(shop.crafts[shop.pat], reason or "the search did not come back")
+		self:ShopProductNext()
+		return
+	end
+
 	local item = shop.queue[shop.at]
 	Note(item, reason or "the search did not come back")
 	-- never found out what was for sale, so the safe assumption is none of it
 	if item and item.avail == nil then item.avail = 0 end
+	if item and shop.phase == "survey" then
+		item.searchFailed = true
+		item.options, item.fairQty, item.maxQty = nil, 0, 0
+	end
 	self:ShopNext()
 end
 
@@ -1041,11 +1707,20 @@ function BS:ShopGoAgain(run)
 	-- you asked it to leave this one; short is the point, not a problem
 	if item.skipped then return false end
 
-	local short = (item.want or 0) - (item.got or 0)
+	-- what you approved, not what the recipes wanted: the difference was your
+	-- choice in the quote, and going back for it would be spending past it
+	local target = item.quoteQty or item.want or 0
+	local short  = target - (item.got or 0)
 	if short <= 0 then return false end
 
-	-- no progress last time round: another search finds the same nothing
-	if (run.got or 0) <= 0 then return false end
+	-- no progress last time round: another search finds the same nothing. That
+	-- is an answer, though, and the reagent keeps it rather than ending short
+	-- with nothing written against it
+	if (run.got or 0) <= 0 then
+		Note(item, StopReasonText(run)
+			or format("the other %s could not be bought", BS.Comma(short)))
+		return false
+	end
 
 	item.passes = (item.passes or 1) + 1
 	if item.passes > MAX_PASSES then
@@ -1056,7 +1731,7 @@ function BS:ShopGoAgain(run)
 
 	self:Print(format("%s: |cffffffff%s|r of %s so far - going back for the other %s.",
 		item.link or item.name, BS.Comma(item.got or 0),
-		BS.Comma(item.want or 0), BS.Comma(short)))
+		BS.Comma(target), BS.Comma(short)))
 
 	--[[
 		Back one, so the queue walker lands on this same reagent again and runs
@@ -1106,6 +1781,17 @@ end
 function BS:ShopSkip()
 	local shop = self.shopRun
 	if not shop then return end
+	if shop.phase == "quote" then return end		-- nothing is running to skip
+
+	-- leaving one craft's price check: it falls back to the last scan's price
+	if shop.phase == "products" then
+		if self.buySearch then
+			self:BuyCancelSearch("Skipped that price check.")	-- back through ShopSearchFailed
+		else
+			self:ShopProductNext()
+		end
+		return
+	end
 
 	local item = shop.queue[shop.at]
 	Note(item, "you skipped it")
@@ -1146,6 +1832,30 @@ function BS:ShopStop(reason, finished)
 	self.shopRun = nil
 
 	if finished then self:ShopTally(shop, finished) end
+	if self.HideShopQuote then self:HideShopQuote() end
+
+	--[[
+		Stopped while pricing, or at the quote. Nothing has been spent, so there
+		is nothing to report - a page of "left alone" reasons for a list you
+		simply decided not to buy is noise. One line, and back to the page you
+		came from. The last real run stays remembered, so its uncollected-mail
+		warning is not lost to a cancel.
+	]]
+	if shop.phase ~= "buy" and (shop.got or 0) <= 0 then
+		if self.buyRun then self:BuyStop(nil) end
+		if self.buySearch then self:BuyCancelSearch(nil) end
+		self:BuyClearTarget()
+
+		local line = (reason or "Shopping cancelled.") .. " Nothing was bought."
+		self:Print(line)
+		self:SetStatus(line)
+		self:RefreshBuy()
+		self:RefreshCraft()
+
+		local mode = self.Mode and self:Mode(shop.mode)
+		if mode and mode.tab and self.SetTab then self:SetTab(mode.tab) end
+		return
+	end
 
 	local run = self.buyRun
 	if run then
@@ -1294,12 +2004,8 @@ function BS:ShopReport(shop)
 		a recipe being cut back is the reason for most of what is on that list
 		and reads as an explanation rather than a second complaint.
 	]]
-	if #shop.capped > 0 then
-		self:PrintCapped(shop, "|cffffd100What you can make from this:|r")
-		self:Print("|cff888888Everything was bought for those numbers, not the ones "
-			.. "you typed - your Want column is untouched, so fixing the short reagent "
-			.. "and running it again picks up the rest.|r")
-	end
+	-- the cuts themselves, and why, are in the what-you-can-make list at the end:
+	-- worked out from what really arrived rather than from what was planned
 
 	if #left > 0 then
 		self:Print(format("|cffff8800%d left alone:|r", #left))
@@ -1312,7 +2018,7 @@ function BS:ShopReport(shop)
 		]]
 		local dear = 0
 		for _, item in ipairs(left) do
-			if item.why and string.find(item.why, "dearer than", 1, true) then
+			if item.why and string.find(item.why, "limit", 1, true) then
 				dear = dear + 1
 			end
 			self:Print(format("   %s|cff888888 - %s|r", item.link or item.name,
@@ -1320,11 +2026,11 @@ function BS:ShopReport(shop)
 		end
 
 		if dear > 0 then
-			self:Print(format("|cff888888%s priced above what the list allows. The "
-				.. "limit is %d%% over the quoted price - |cffffffff/snipe shopmax "
-				.. "<percent>|r|cff888888 moves it, and 0 means never pay a copper "
-				.. "over.|r", dear == 1 and "That one was" or
-				format("%d of those were", dear), self:ShopOver()))
+			self:Print(format("|cff888888%s over your +%d%% limit and left unticked in "
+				.. "the quote. Tick it next time to buy it anyway, or move the limit "
+				.. "with |cffffffff/snipe shopmax <percent>|r|cff888888.|r",
+				dear == 1 and "That one was" or format("%d of those were", dear),
+				self:ShopOver()))
 		end
 
 		self:Print("|cff888888Any of those you still want are one search away on this "
@@ -1357,6 +2063,67 @@ end
 	And it says to go to the mailbox, because on 3.3.5a none of it is in your
 	bags yet and a flask cannot be made out of a parcel.
 ]]
+--[[
+	Why one reagent left a recipe short: the counts, and the cause.
+
+	Two very different kinds of shortfall, and telling them apart is the point.
+
+	One is decided before a copper moves: the quote could not cover the reagent,
+	because not enough was for sale, or because the rest cost more than your
+	limit and you left it unticked. The survey wrote down exactly what was up
+	and what was fair, so this is worked out from those figures rather than
+	from whatever happened to be noted last.
+
+	The other happens while buying: the quote covered it, and the purchase did
+	not get there - taken by somebody else, dearer by the time it was bought, the
+	gold ran out, you skipped it. Those were written against the reagent at the
+	moment they happened.
+
+	Returns the reagent as a link, the counts, and the reason, separately: a
+	link carries its own colour and ends it, so whatever follows has to set its
+	own.
+]]
+function BS:ShopShortReason(shop, item)
+	local over = shop.over or self:ShopOver()
+	local got  = item.got or 0
+	local need = item.surveyNeed or item.want or 0
+	local counts = format("got %s of %s", BS.Comma(got), BS.Comma(need))
+
+	local usable = item.accept and (item.maxQty or 0) or (item.fairQty or 0)
+	local why
+
+	if item.searchFailed then
+		why = "the auction house would not answer the search for it"
+	elseif (item.forSale or 0) <= 0 then
+		why = "nobody was selling it"
+	elseif item.skipped then
+		why = "you skipped it"
+	elseif usable < need then
+		if not item.accept and (item.maxQty or 0) > (item.fairQty or 0) then
+			if item.noPrice then
+				why = "there is no usual price on file for it, and you left it unticked "
+					.. "in the quote"
+			else
+				why = format("only %s were within your +%d%% limit, and you left the "
+					.. "rest unticked in the quote", BS.Comma(item.fairQty or 0), over)
+			end
+			if (item.maxQty or 0) < need then
+				why = why .. format(" - and only %s were up in all",
+					BS.Comma(item.maxQty or 0))
+			end
+		else
+			why = format("only %s were for sale", BS.Comma(item.maxQty or 0))
+		end
+	elseif got < (item.quoteQty or 0) then
+		why = item.why or format("%s of the %s approved did not come through",
+			BS.Comma((item.quoteQty or 0) - got), BS.Comma(item.quoteQty or 0))
+	else
+		why = item.why or "not enough of it arrived"
+	end
+
+	return item.link or item.name, counts, why
+end
+
 function BS:ReportAchievable(shop)
 	if not shop or not shop.origWants then return end
 
@@ -1366,7 +2133,15 @@ function BS:ReportAchievable(shop)
 		supply[item.name] = (bags or 0) + (bank or 0) + (item.got or 0)
 	end
 
-	local can = self:SolveWants(shop.prof, shop.origWants, supply, shop.mode)
+	--[[
+		The solver already knows which reagent capped each recipe - that is how
+		it decided the cap - so the reason comes from the same answer as the
+		number beside it and cannot disagree with it.
+	]]
+	local can, changes = self:SolveWants(shop.prof, shop.origWants, supply, shop.mode)
+	local blockedBy, byName, explained = {}, {}, {}
+	for _, ch in ipairs(changes or {}) do blockedBy[ch.name] = ch.why end
+	for _, item in ipairs(shop.queue) do byName[item.name] = item end
 
 	--[[
 		Ordered by what you asked for rather than by what came back, so a recipe
@@ -1386,6 +2161,29 @@ function BS:ReportAchievable(shop)
 				short = true
 				lines[#lines + 1] = format("   |cffff8800%s|r x %s   |cff888888(you "
 					.. "asked for %s)|r", BS.Comma(got), c.name, BS.Comma(asked))
+
+				--[[
+					And why, one line per reagent that held it back. A reagent
+					that caps several recipes is explained the first time and
+					pointed at after that - the same paragraph four times is how
+					the one line that matters gets scrolled past.
+				]]
+				for _, reagent in ipairs(blockedBy[c.name] or {}) do
+					local item = byName[reagent]
+					if not item then
+						lines[#lines + 1] = format("      |cffffcc88short on %s - not "
+							.. "enough in your bags, and it was not on the list to buy|r",
+							reagent)
+					elseif explained[reagent] then
+						lines[#lines + 1] = format("      short on %s|cffffcc88 - see "
+							.. "above|r", item.link or reagent)
+					else
+						explained[reagent] = true
+						local label, counts, why = self:ShopShortReason(shop, item)
+						lines[#lines + 1] = format("      short on %s|cffffcc88: %s - %s|r",
+							label, counts, why)
+					end
+				end
 			end
 		end
 	end
@@ -1395,6 +2193,22 @@ function BS:ReportAchievable(shop)
 	self:Print(short and "|cffffd100You now have the reagents for:|r"
 		or "|cff00ff00Done - you have the reagents for everything you planned:|r")
 	for _, line in ipairs(lines) do self:Print(line) end
+
+	if short then
+		self:Print("|cff888888Your Want column is untouched - sort out the short reagent "
+			.. "and run it again to pick up the rest.|r")
+	end
+
+	if shop.dropped and #shop.dropped > 0 then
+		local parts = {}
+		for _, d in ipairs(shop.dropped) do
+			parts[#parts + 1] = (d.to > 0)
+				and format("%s (%s of %s)", d.name, BS.Comma(d.to), BS.Comma(d.from))
+				or  d.name
+		end
+		self:Print("|cff888888Left out in the quote, by you: " .. table.concat(parts, ", ")
+			.. "|r")
+	end
 
 	if shop.got > 0 then
 		self:Print("|cff888888Collect your mail before crafting - auction purchases "
@@ -1410,6 +2224,21 @@ end
 function BS:ShopStatus()
 	local shop = self.shopRun
 	if not shop then return nil end
+
+	if shop.phase == "quote" then
+		return "|cffffd100Shopping list - quote ready|r" .. "\n"
+			.. "Nothing has been bought. The exact total is in the window: tick anything "
+			.. "over your limit you want anyway, then Buy or Cancel."
+	end
+
+	if shop.phase == "products" then
+		local c = shop.crafts[shop.pat]
+		return format("|cffffd100Pricing what you make %d/%d|r%s",
+			min(shop.pat or 0, #shop.crafts), #shop.crafts,
+			c and ("  -  |cffffffff" .. c.name .. "|r") or "")
+			.. "\nChecking what each finished craft sells for, so the quote can show "
+			.. "profit.  Nothing is being bought yet."
+	end
 
 	local item    = shop.queue[shop.at]
 	local surveying = (shop.phase == "survey")

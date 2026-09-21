@@ -2026,21 +2026,25 @@ function BS:BuildCraftUI(parent, m)
 	shopBtn:SetPoint("BOTTOMLEFT", 528, 18)
 	shopBtn:SetWidth(122)
 	shopBtn:SetHeight(24)
-	shopBtn:SetText("Buy the list")
+	shopBtn:SetText("Price & buy")
 	shopBtn:SetScript("OnClick", function()
+		-- a quote you closed the window on is still waiting: bring it back
+		if BS.shopRun and BS.shopRun.phase == "quote" and BS.ShowShopQuote then
+			BS:ShowShopQuote()
+			return
+		end
 		if BS:HasShop() then BS:ShopStart(prof(), m) else BS:NoShop() end
 	end)
-	Tip(shopBtn, "Go and buy all of it",
-		"Takes the shopping list to the Buy tab and works down it for you: it fills "
-		.. "in each search, finds the cheapest set of auctions that covers what you "
-		.. "are short of, and arms the purchase. You press BUY, and it moves on to "
-		.. "the next reagent on its own.\n\n"
-		.. "You approve one total at the start and it never spends past it. Anything "
-		.. "dearer than the list said - by more than the margin on the right - is "
-		.. "left alone and named in chat with both figures, so nothing quietly costs "
-		.. "triple because the market moved since the scan.\n\n"
-		.. "WoW only lets an addon buy while you are actually clicking, so the "
-		.. "presses are yours. Everything between them is not.")
+	Tip(shopBtn, "Price the list, then buy it",
+		"The figure on the button is an estimate from the last scan.\n\n"
+		.. "Pressing it looks up every reagent on the shopping list and buys nothing. Then "
+		.. "it shows you the exact total: every reagent at the price being asked right "
+		.. "now, which ones will come up short, and which recipes that cuts.\n\n"
+		.. "Anything more than the +% on the right over its usual price is listed "
+		.. "separately, and only bought if you tick it.\n\n"
+		.. "Approve the total and it buys the list, never spending more than that "
+		.. "figure. WoW only lets an addon buy while you are clicking, so you still "
+		.. "press BUY for each page of auctions.")
 	g.shopBtn = shopBtn
 
 	--[[
@@ -2090,16 +2094,15 @@ function BS:BuildCraftUI(parent, m)
 	over:SetScript("OnEnterPressed", function(self) self:ClearFocus() end)
 	over:SetScript("OnEditFocusLost", function(self) commitOver() over.Refresh() end)
 	over:SetScript("OnEscapePressed", function(self) over.Refresh() self:ClearFocus() end)
-	Tip(over, "How far over the quote to go",
-		"A run pays at most this much more than the shopping list said, per reagent, "
-		.. "and leaves anything dearer.\n\n"
-		.. "It is measured against the part of the purchase you actually needed. A "
-		.. "stack that overshoots is judged on the items you were short of rather "
-		.. "than on the ones that came with them, so a lone stack of twenty can never "
-		.. "sneak past when you only wanted two.\n\n"
-		.. "20% is a sensible starting point: enough that a cheap auction being taken "
-		.. "between the scan and the trip does not stop the run, tight enough that a "
-		.. "market which has genuinely moved does.")
+	Tip(over, "What counts as over-priced",
+		"A reagent is fair if it can be had for at most this much over its usual "
+		.. "price. The part that costs more is shown separately in the quote and only "
+		.. "bought if you tick it.\n\n"
+		.. "It is measured against the part of the purchase you actually need, so a "
+		.. "lone stack of twenty can never sneak past when you only wanted two.\n\n"
+		.. "It also caps how far one reagent may rise between the quote and the "
+		.. "purchase - and even then only out of money another reagent saved. The "
+		.. "total you approve is never exceeded.")
 	g.over = over
 
 	local overPct = g:CreateFontString(nil, "ARTWORK")
@@ -2171,7 +2174,7 @@ local function PaintRecipeDetail(g, p, name)
 end
 
 -- The list is worked out once per repaint by the caller and handed in, because
--- the Buy the list button needs the same figures and this runs on every tick of
+-- the Price & buy button needs the same figures and this runs on every tick of
 -- the scroll wheel. Two walks of every reagent per frame is one too many.
 local function PaintShoppingList(g, p, buy, vendor, cost, exact)
 	if #buy == 0 and #vendor == 0 then
@@ -2341,7 +2344,7 @@ function BS:RefreshCraftPage(m)
 	----------------------------------------------------------- breakdown --
 	--[[
 		One walk of the shopping list per repaint, shared by the breakdown below
-		and by the Buy the list button at the bottom. Costing a reagent can fall
+		and by the Price & buy button at the bottom. Costing a reagent can fall
 		through to Auctionator, and this runs on every notch of the scroll
 		wheel, so the walk is done once and passed to both.
 	]]
@@ -2398,7 +2401,10 @@ function BS:RefreshCraftPage(m)
 	]]
 	if g.shopBtn then
 		if not BS:HasShop() then
-			g.shopBtn:SetText("Buy the list")
+			g.shopBtn:SetText("Price & buy")
+			g.shopBtn:Enable()
+		elseif self.shopRun and self.shopRun.phase == "quote" then
+			g.shopBtn:SetText("Show the quote")
 			g.shopBtn:Enable()
 		elseif self.shopRun then
 			g.shopBtn:SetText("shopping...")
@@ -2412,7 +2418,13 @@ function BS:RefreshCraftPage(m)
 				g.shopBtn:SetText("nothing to buy")
 				g.shopBtn:Disable()
 			else
-				g.shopBtn:SetText("Buy " .. BS.MoneyPlain(est))
+				--[[
+					The estimate stays on the button: it is the quick answer to "can
+					I afford this list" before pressing anything. Marked with a
+					tilde because it is the last scan's prices, not the auction
+					house's - the exact figure is what the quote is for.
+				]]
+				g.shopBtn:SetText("Buy ~" .. BS.MoneyPlain(est))
 				g.shopBtn:Enable()
 			end
 		end
@@ -2479,6 +2491,12 @@ function BS:SetTab(which)
 				g:Hide()
 			end
 		end
+	end
+
+	-- the shopping quote sits over every page, so it has to come up after them
+	local qf = self.quoteFrame
+	if qf and qf:IsShown() then
+		qf:SetFrameLevel(self.frame:GetFrameLevel() + 40)
 	end
 
 	-- the side panels belong to the auction page and have nowhere to sit on
@@ -3450,12 +3468,20 @@ function BS:RefreshBuy()
 			screen is there by accident of when the paint landed rather than
 			because it is the one the next press would buy.
 		]]
-		local surveying = (self.shopRun.phase == "survey")
-		g.buyBtn:SetText(BusyText(surveying and "checking..." or "searching..."))
-		g.buyBtn:Disable()
-		g.state:SetText(BusyText(surveying
-			and "Checking what is for sale. Nothing is being bought yet."
-			or  "Looking up the next reagent."))
+		local phase = self.shopRun.phase
+		if phase == "quote" then
+			g.buyBtn:SetText(BusyText("waiting for you"))
+			g.buyBtn:Disable()
+			g.state:SetText(BusyText("The quote is ready - approve it or cancel in the "
+				.. "window. Nothing has been bought."))
+		else
+			local surveying = (phase == "survey" or phase == "products")
+			g.buyBtn:SetText(BusyText(surveying and "pricing..." or "searching..."))
+			g.buyBtn:Disable()
+			g.state:SetText(BusyText(surveying
+				and "Pricing what is for sale. Nothing is being bought yet."
+				or  "Looking up the next reagent."))
+		end
 
 	elseif done then
 		--[[
@@ -3499,7 +3525,11 @@ function BS:RefreshBuy()
 	else
 		g.stopBtn:Hide()
 	end
-	if self.shopRun then g.skipBtn:Show() else g.skipBtn:Hide() end
+	if self.shopRun and self.shopRun.phase ~= "quote" then
+		g.skipBtn:Show()
+	else
+		g.skipBtn:Hide()
+	end
 
 	self.buyPainting = nil
 	if self.buyDirty then
@@ -4270,6 +4300,638 @@ function BS:RefreshSell()
 	if self.sellDirty then
 		self.sellDirty = nil
 		self:RefreshSell()
+	end
+end
+
+--=============================================================================
+--  the shopping list quote
+--=============================================================================
+
+--[[
+	The one decision a shopping run asks you for, with everything on the table.
+
+	Two halves. The crafts on top, because they are what you are deciding about:
+	what each one's reagents cost, what it sells for, and what that leaves. The
+	reagents underneath, because they are what the gold actually goes on.
+
+	Every number is worked out from what was for sale a moment ago, and every
+	change - a craft unticked, a Want lowered, a dear reagent ticked - works the
+	whole thing out again. That matters because the crafts are not independent:
+	reagents shared between them are bought cheapest first, so buying less of one
+	craft can make the others' reagents cheaper, and the only honest way to show
+	that is to redo the sum.
+]]
+local QC_ROWS     = 8		-- crafts
+local QR_ROWS     = 7		-- reagents
+local QUOTE_ROW_H = 20
+local QUOTE_TONE  = { good = "|cff40ff40", warn = "|cffff9933",
+                      bad  = "|cffff4444", dim  = "|cff888888" }
+
+local function SignedMoney(c)
+	if not c then return "|cff666666?|r" end
+	if c >= 0 then return "|cff40ff40+" .. BS.MoneyPlain(c) .. "|r" end
+	return "|cffff4444-" .. BS.MoneyPlain(-c) .. "|r"
+end
+
+local SELL_SOURCE = {
+	search   = "checked just now",
+	check    = "checked within the hour",
+	scan     = "read off a scan within the hour",
+	lastscan = "the last scan's price",
+}
+
+local function QuoteHeads(g, y, heads)
+	local band = g:CreateTexture(nil, "BACKGROUND")
+	band:SetTexture(1, 1, 1, 0.06)
+	band:SetPoint("TOPLEFT", 14, y)
+	band:SetWidth(788)
+	band:SetHeight(20)
+
+	for _, h in ipairs(heads) do
+		local fs = g:CreateFontString(nil, "ARTWORK")
+		Font(fs, 10, 0.8, 0.8, 0.8)
+		fs:SetPoint("TOPLEFT", 18 + h[2], y - 4)
+		fs:SetWidth(h[3])
+		fs:SetJustifyH(h[4])
+		fs:SetText(h[1])
+	end
+end
+
+-- a faux-scrolled list: a fixed set of rows repainted as the offset moves
+local function QuoteRows(g, name, y, count)
+	local scroll = CreateFrame("ScrollFrame", name, g, "FauxScrollFrameTemplate")
+	scroll:SetPoint("TOPLEFT", 18, y)
+	scroll:SetWidth(756)
+	scroll:SetHeight(count * QUOTE_ROW_H)
+	scroll:SetScript("OnVerticalScroll", function(self, offset)
+		FauxScrollFrame_OnVerticalScroll(self, offset, QUOTE_ROW_H,
+			function() BS:RefreshShopQuote() end)
+	end)
+
+	local rows = {}
+	for i = 1, count do
+		local row = CreateFrame("Frame", nil, g)
+		row:SetWidth(740)
+		row:SetHeight(QUOTE_ROW_H)
+		if i == 1 then
+			row:SetPoint("TOPLEFT", scroll, "TOPLEFT", 0, 0)
+		else
+			row:SetPoint("TOPLEFT", rows[i - 1], "BOTTOMLEFT", 0, 0)
+		end
+
+		if i % 2 == 0 then
+			local stripe = row:CreateTexture(nil, "BACKGROUND")
+			stripe:SetTexture(1, 1, 1, 0.035)
+			stripe:SetAllPoints(row)
+		end
+
+		local cb = CreateFrame("CheckButton", nil, row, "UICheckButtonTemplate")
+		cb:SetWidth(20)
+		cb:SetHeight(20)
+		cb:SetPoint("LEFT", 7, 0)
+		row.check = cb
+
+		row.cells = {}
+		row:EnableMouse(true)
+		row:SetScript("OnLeave", function() GameTooltip:Hide() end)
+		row:Hide()
+		rows[i] = row
+	end
+	return scroll, rows
+end
+
+local function QuoteCells(row, layout)
+	for c, l in ipairs(layout) do
+		local fs = row:CreateFontString(nil, "ARTWORK")
+		Font(fs, l[4] or 11, 1, 1, 1)
+		fs:SetPoint("LEFT", l[1], 0)
+		fs:SetWidth(l[2])
+		fs:SetHeight(QUOTE_ROW_H)
+		fs:SetJustifyH(l[3])
+		row.cells[c] = fs
+	end
+end
+
+function BS:BuildShopQuoteUI(parent)
+	local g = CreateFrame("Frame", "BidSniperQuoteFrame", parent)
+	g:SetPoint("TOPLEFT", parent, "TOPLEFT", 10, -34)
+	g:SetPoint("BOTTOMRIGHT", parent, "BOTTOMRIGHT", -11, 10)
+	g:EnableMouse(true)
+	g:Hide()
+
+	g:SetBackdrop({
+		bgFile   = "Interface\\Buttons\\WHITE8X8",
+		edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+		tile = false, edgeSize = 14,
+		insets = { left = 3, right = 3, top = 3, bottom = 3 },
+	})
+	g:SetBackdropColor(0.05, 0.05, 0.07, 1)
+	g:SetBackdropBorderColor(0.55, 0.45, 0.15, 1)
+
+	local sheet = g:CreateTexture(nil, "BACKGROUND")
+	sheet:SetTexture(0.05, 0.05, 0.07, 1)
+	sheet:SetAllPoints(g)
+
+	local title = g:CreateFontString(nil, "ARTWORK")
+	Font(title, 13, 1, 0.82, 0)
+	title:SetPoint("TOPLEFT", 18, -10)
+	title:SetText("Shopping list - the exact price, and what it earns")
+
+	local age = g:CreateFontString(nil, "ARTWORK")
+	Font(age, 10, 0.6, 0.6, 0.6)
+	age:SetPoint("TOPRIGHT", -18, -13)
+	g.age = age
+
+	local sub = g:CreateFontString(nil, "ARTWORK")
+	Font(sub, 10, 0.65, 0.65, 0.65)
+	sub:SetPoint("TOPLEFT", 18, -30)
+	sub:SetWidth(780)
+	sub:SetJustifyH("LEFT")
+	g.sub = sub
+
+	------------------------------------------------------------ the crafts --
+	QuoteHeads(g, -60, { { "Make", 0, 34, "CENTER" }, { "Craft", 30, 226, "LEFT" },
+	                     { "Want", 262, 40, "CENTER" }, { "Making", 306, 44, "RIGHT" },
+	                     { "Reagents each", 354, 110, "RIGHT" },
+	                     { "Sells for each", 468, 110, "RIGHT" },
+	                     { "Profit", 582, 156, "RIGHT" } })
+	g.craftScroll, g.craftRows = QuoteRows(g, "BidSniperQuoteCraftScroll", -82, QC_ROWS)
+
+	for _, row in ipairs(g.craftRows) do
+		QuoteCells(row, { { 30, 226, "LEFT" }, { 306, 44, "RIGHT" }, { 354, 110, "RIGHT" },
+		                  { 468, 110, "RIGHT" }, { 582, 156, "RIGHT" } })
+
+		row.check:SetScript("OnClick", function(self)
+			local r = self:GetParent().crow
+			if r then BS:ShopToggleCraft(r.name) end
+		end)
+		Tip(row.check, "Make this?",
+			"Untick to leave the craft out of this purchase. Its reagents stop being "
+			.. "bought, and everything is worked out again - so a reagent it shared with "
+			.. "other crafts can get cheaper for them.\n\nYour Want column is not "
+			.. "changed.")
+
+		--[[
+			How many to make, typed on the row. Saved against the craft rather than
+			the row, because rows are reused as the list scrolls; `painting` marks
+			the addon writing the number back so that is not read as typing.
+		]]
+		local eb = CreateFrame("EditBox", nil, row)
+		eb:SetPoint("LEFT", 262, 0)
+		eb:SetWidth(40)
+		eb:SetHeight(18)
+		eb:SetAutoFocus(false)
+		eb:SetNumeric(true)
+		eb:SetMaxLetters(4)
+		eb:SetJustifyH("CENTER")
+		eb:SetTextInsets(2, 2, 0, 0)
+		eb:SetBackdrop({
+			bgFile   = "Interface\\ChatFrame\\ChatFrameBackground",
+			edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+			tile = true, tileSize = 16, edgeSize = 10,
+			insets = { left = 2, right = 2, top = 2, bottom = 2 },
+		})
+		eb:SetBackdropColor(0, 0, 0, 0.65)
+		eb:SetBackdropBorderColor(0.45, 0.45, 0.45, 1)
+		Font(eb, 11, 1, 1, 1)
+		eb:SetScript("OnTextChanged", function(self)
+			if self.painting or not self.owner then return end
+			BS:ShopSetCraft(self.owner, self:GetText())
+		end)
+		eb:SetScript("OnEnterPressed", function(self) self:ClearFocus() end)
+		eb:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
+		eb:SetScript("OnEditFocusLost", function() BS:RefreshShopQuote() end)
+		Tip(eb, "How many to make",
+			"Up to what your Want column says. Lower it and the quote is worked out "
+			.. "again - the dearest auctions of a reagent are the first to go, so making "
+			.. "fewer of one craft can make the reagents cheaper for the rest.\n\n"
+			.. "Your Want column is not changed.")
+		row.want = eb
+
+		row:SetScript("OnEnter", function(self)
+			local r = self.crow
+			if not r then return end
+			GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+			if r.link then
+				GameTooltip:SetHyperlink(r.link)
+			else
+				GameTooltip:AddLine(r.name or "?", 1, 1, 1)
+			end
+			GameTooltip:AddLine(" ")
+
+			if not r.on then
+				GameTooltip:AddLine("Unticked - left out of this purchase. The figures "
+					.. "below are what one would earn.", 0.6, 0.6, 0.6, true)
+			elseif r.making < r.chosen then
+				GameTooltip:AddLine(format("Only %d of the %d can be made - not enough %s.",
+					r.making, r.chosen, table.concat(r.cutBy or { "reagents" }, " or ")),
+					1, 0.6, 0.2, true)
+			end
+
+			GameTooltip:AddLine("Reagents for one craft", 1, 0.82, 0)
+			for _, l in ipairs(r.lines) do
+				local cost
+				if l.how == "vendor" then
+					cost = "|cff88bbfffrom a vendor|r"
+				elseif l.unit then
+					cost = BS.Money(l.unit * l.need)
+				else
+					cost = "|cffff4444no price|r"
+				end
+				GameTooltip:AddDoubleLine(format("   %d x %s", l.need, l.name), cost,
+					0.85, 0.85, 0.85, 1, 1, 1)
+			end
+			GameTooltip:AddDoubleLine("All of them", r.missing and "?" or BS.Money(r.each),
+				0.8, 0.8, 0.8, 1, 1, 1)
+
+			GameTooltip:AddLine(" ")
+			if r.yield ~= 1 then
+				GameTooltip:AddDoubleLine("One craft makes", format("%g", r.yield),
+					0.8, 0.8, 0.8, 1, 1, 1)
+			end
+			GameTooltip:AddDoubleLine("Sells for, one craft",
+				r.sell and BS.Money(r.sell) or "|cffff4444no price|r", 0.8, 0.8, 0.8, 1, 1, 1)
+			local sp = r.sp
+			if sp then
+				local where = SELL_SOURCE[sp.src] or "no price anywhere"
+				if sp.why then where = where .. " - " .. sp.why end
+				if (sp.dropped or 0) > 0 then
+					where = where .. format(", %d giveaway listing%s ignored", sp.dropped,
+						sp.dropped == 1 and "" or "s")
+				end
+				GameTooltip:AddLine("Sell price: " .. where, 0.6, 0.6, 0.6, true)
+			end
+
+			if r.profitEach then
+				GameTooltip:AddLine(" ")
+				GameTooltip:AddDoubleLine("Profit, one craft", SignedMoney(r.profitEach),
+					0.8, 0.8, 0.8, 1, 1, 1)
+				GameTooltip:AddDoubleLine("After the 5% AH cut", SignedMoney(r.afterCutEach),
+					0.6, 0.6, 0.6, 1, 1, 1)
+			end
+
+			GameTooltip:AddLine(" ")
+			GameTooltip:AddLine("Each reagent is priced at the average of everything this "
+				.. "run buys of it, across every craft, together with what your bags already "
+				.. "hold at its usual price.", 0.6, 0.9, 1, true)
+			GameTooltip:Show()
+		end)
+	end
+
+	---------------------------------------------------------- the reagents --
+	QuoteHeads(g, -250, { { "All?", 0, 34, "CENTER" }, { "Reagent", 30, 206, "LEFT" },
+	                      { "Need", 240, 44, "RIGHT" }, { "Buying", 288, 50, "RIGHT" },
+	                      { "Paying each", 342, 92, "RIGHT" }, { "Cost", 438, 100, "RIGHT" },
+	                      { "", 546, 192, "LEFT" } })
+	g.reagScroll, g.reagRows = QuoteRows(g, "BidSniperQuoteScroll", -272, QR_ROWS)
+
+	for _, row in ipairs(g.reagRows) do
+		QuoteCells(row, { { 30, 206, "LEFT" }, { 240, 44, "RIGHT" }, { 288, 50, "RIGHT" },
+		                  { 342, 92, "RIGHT" }, { 438, 100, "RIGHT" }, { 546, 192, "LEFT", 10 } })
+
+		row.check:SetScript("OnClick", function(self)
+			local r = self:GetParent().qrow
+			if r then BS:ShopToggleAccept(r.item) end
+		end)
+		row.check:SetScript("OnEnter", function(self)
+			local r = self:GetParent().qrow
+			if not r then return end
+			GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+			GameTooltip:AddLine("Buy all of it, even the dear part", 1, 1, 1)
+			if r.item.noPrice then
+				GameTooltip:AddLine("There is no usual price on file for this, so nothing "
+					.. "can be called fair or dear. Ticked, it is bought at whatever the "
+					.. "auction house is asking - the cost shown is that price.",
+					0.8, 0.8, 0.8, true)
+			else
+				GameTooltip:AddLine(format("Ticked, the %d that cost more than your "
+					.. "+%d%% limit are bought too, for %s more.",
+					r.extraQty, BS.shopRun and BS.shopRun.over or 0,
+					BS.Money(r.extraCost)), 0.8, 0.8, 0.8, true)
+			end
+			GameTooltip:AddLine("Everything is worked out again straight away.",
+				0.6, 0.9, 1, true)
+			GameTooltip:Show()
+		end)
+		row.check:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
+		row:SetScript("OnEnter", function(self)
+			local r = self.qrow
+			if not r then return end
+			local it = r.item
+			GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+			if it.link then
+				GameTooltip:SetHyperlink(it.link)
+			else
+				GameTooltip:AddLine(it.name or "?", 1, 1, 1)
+			end
+			GameTooltip:AddLine(" ")
+			GameTooltip:AddDoubleLine("Short after your bags", BS.Comma(r.need),
+				0.8, 0.8, 0.8, 1, 1, 1)
+			GameTooltip:AddDoubleLine("For sale right now", BS.Comma(it.forSale or 0),
+				0.8, 0.8, 0.8, 1, 1, 1)
+			if it.unit then
+				GameTooltip:AddDoubleLine("Usual price each", BS.Money(it.unit),
+					0.8, 0.8, 0.8, 1, 1, 1)
+			end
+			if (it.fairQty or 0) > 0 then
+				GameTooltip:AddDoubleLine(format("Within your +%d%%",
+					BS.shopRun and BS.shopRun.over or 0), BS.Comma(it.fairQty),
+					0.8, 0.8, 0.8, 0.4, 1, 0.4)
+			end
+			if (r.extraQty or 0) > 0 then
+				GameTooltip:AddDoubleLine("Over it", format("%s more for %s%s",
+					BS.Comma(r.extraQty), BS.Money(r.extraCost),
+					r.overPct and format("  (+%d%% overall)", r.overPct) or ""),
+					0.8, 0.8, 0.8, 1, 0.6, 0.2)
+			end
+			GameTooltip:AddLine(" ")
+			GameTooltip:AddDoubleLine("Buying", format("%s for %s", BS.Comma(r.take),
+				BS.Money(r.cost)), 0.8, 0.8, 0.8, 1, 1, 1)
+			if (r.gets or 0) > r.take then
+				GameTooltip:AddLine(format("The cheapest way to get them is a bigger "
+					.. "stack, so %d arrive.", r.gets), 0.6, 0.6, 0.6, true)
+			end
+			GameTooltip:Show()
+		end)
+	end
+
+	-- the wheel scrolls whichever list the cursor is over
+	g:SetScript("OnMouseWheel", function(self, delta)
+		local name = "BidSniperQuoteScrollScrollBar"
+		if type(MouseIsOver) == "function" and MouseIsOver(self.craftScroll) then
+			name = "BidSniperQuoteCraftScrollScrollBar"
+		end
+		local bar = _G[name]
+		if bar then bar:SetValue(bar:GetValue() - (delta or 0) * QUOTE_ROW_H * 3) end
+	end)
+	g:EnableMouseWheel(true)
+
+	local notes = g:CreateFontString(nil, "ARTWORK")
+	Font(notes, 11, 1, 1, 1)
+	notes:SetPoint("TOPLEFT", 18, -272 - QR_ROWS * QUOTE_ROW_H - 10)
+	notes:SetWidth(780)
+	notes:SetJustifyH("LEFT")
+	g.notes = notes
+
+	------------------------------------------------------------ the totals --
+	local total = g:CreateFontString(nil, "ARTWORK")
+	Font(total, 15, 1, 1, 1)
+	total:SetPoint("BOTTOMLEFT", 18, 62)
+	total:SetWidth(470)
+	total:SetJustifyH("LEFT")
+	g.total = total
+
+	local profit = g:CreateFontString(nil, "ARTWORK")
+	Font(profit, 12, 1, 1, 1)
+	profit:SetPoint("BOTTOMLEFT", 18, 42)
+	profit:SetWidth(470)
+	profit:SetJustifyH("LEFT")
+	g.profit = profit
+
+	local warn = g:CreateFontString(nil, "ARTWORK")
+	Font(warn, 10, 1, 1, 1)
+	warn:SetPoint("BOTTOMLEFT", 18, 22)
+	warn:SetWidth(470)
+	warn:SetJustifyH("LEFT")
+	g.warn = warn
+
+	local buyBtn = CreateFrame("Button", nil, g, "UIPanelButtonTemplate")
+	buyBtn:SetPoint("BOTTOMRIGHT", -18, 18)
+	buyBtn:SetWidth(200)
+	buyBtn:SetHeight(26)
+	buyBtn:SetScript("OnClick", function() BS:ShopApprove() end)
+	Tip(buyBtn, "Buy it for this total",
+		"Starts buying, one reagent at a time, for the crafts left ticked. You still "
+		.. "press BUY for each page of auctions - WoW will not let an addon buy on its "
+		.. "own.\n\n"
+		.. "It never spends more than the total shown. If a price has crept up by the "
+		.. "time a reagent is bought, it is covered only out of money another reagent "
+		.. "came in under, and never by more than your +% - otherwise that reagent is "
+		.. "left short and named at the end.")
+	g.buyBtn = buyBtn
+
+	local cancelBtn = CreateFrame("Button", nil, g, "UIPanelButtonTemplate")
+	cancelBtn:SetPoint("BOTTOMRIGHT", -226, 18)
+	cancelBtn:SetWidth(100)
+	cancelBtn:SetHeight(26)
+	cancelBtn:SetText("Cancel")
+	cancelBtn:SetScript("OnClick", function() BS:ShopStop("Shopping cancelled.") end)
+	Tip(cancelBtn, "Buy nothing", "Nothing has been bought, and nothing will be.")
+
+	-- the age line, refreshed now and then rather than every frame
+	g.tick = 0
+	g:SetScript("OnUpdate", function(self, elapsed)
+		self.tick = self.tick + elapsed
+		if self.tick < 2 then return end
+		self.tick = 0
+		-- the window is SetToplevel and its level moves as you click about, so
+		-- the quote says again that it is on top rather than trusting a number
+		-- worked out once
+		self:SetFrameLevel(parent:GetFrameLevel() + 40)
+		BS:PaintQuoteAge()
+	end)
+
+	self.quoteFrame = g
+end
+
+function BS:PaintQuoteAge()
+	local g, shop = self.quoteFrame, self.shopRun
+	if not g or not shop or not shop.quotedAt then return end
+	local secs = time() - shop.quotedAt
+	if secs < 60 then
+		g.age:SetText("priced just now")
+	elseif secs < 300 then
+		g.age:SetText(format("priced %d min ago", math.floor(secs / 60)))
+	else
+		--[[
+			Old enough to say so. Approving still cannot overspend - the total is a
+			ceiling whatever the market did - but the older the quote, the more of
+			it may come up short, and that is worth a word before you press.
+		]]
+		g.age:SetText(format("|cffff9933priced %d min ago - Cancel and run it again for "
+			.. "fresh prices|r", math.floor(secs / 60)))
+	end
+end
+
+function BS:ShowShopQuote()
+	if not self.frame and self.BuildUI then self:BuildUI() end
+	if not self.frame then
+		self:PrintShopQuote()
+		return
+	end
+	if not self.quoteFrame then self:BuildShopQuoteUI(self.frame) end
+
+	local g = self.quoteFrame
+	self.frame:Show()
+	g:SetFrameLevel(self.frame:GetFrameLevel() + 40)
+
+	for _, name in ipairs({ "BidSniperQuoteCraftScrollScrollBar", "BidSniperQuoteScrollScrollBar" }) do
+		local bar = _G[name]
+		if bar then bar:SetValue(0) end
+	end
+
+	g:Show()
+	self:RefreshShopQuote()
+end
+
+function BS:HideShopQuote()
+	if self.quoteFrame then self.quoteFrame:Hide() end
+end
+
+function BS:RefreshShopQuote()
+	local g = self.quoteFrame
+	if not g or not g:IsShown() then return end
+
+	local shop = self.shopRun
+	if not shop or shop.phase ~= "quote" then
+		g:Hide()
+		return
+	end
+
+	local q = self:ShopQuote()
+	if not q then return end
+
+	g.sub:SetText(format("Priced just now - nothing has been bought. Untick a craft or "
+		.. "lower its Want and everything is worked out again: a reagent shared between "
+		.. "crafts gets cheaper as you buy less of it. Reagents more than |cffffffff+%d%%|r "
+		.. "over their usual price are only bought if you tick them.", shop.over))
+	self:PaintQuoteAge()
+
+	------------------------------------------------------------ the crafts --
+	local offset = FauxScrollFrame_GetOffset(g.craftScroll) or 0
+	for i = 1, QC_ROWS do
+		local row = g.craftRows[i]
+		local r   = q.crafts[offset + i]
+		local eb  = row.want
+
+		if r then
+			row.crow = r
+			row.check:SetChecked(r.on and true or false)
+
+			-- a box being typed into that now stands for a different craft: let
+			-- go of it without saving the half-typed number against the new one
+			if eb.owner ~= r.name and eb:HasFocus() then
+				eb.painting = true
+				eb:ClearFocus()
+				eb.painting = nil
+			end
+			eb.owner = r.name
+			if not eb:HasFocus() then
+				eb.painting = true
+				eb:SetText(tostring(shop.sel[r.name] or 0))
+				eb.painting = nil
+			end
+			eb:SetAlpha(r.on and 1 or 0.4)
+
+			row.cells[1]:SetText(r.on and (r.link or r.name) or ("|cff777777" .. r.name .. "|r"))
+
+			if not r.on then
+				row.cells[2]:SetText("|cff6666660|r")
+			elseif r.making < r.chosen then
+				row.cells[2]:SetText("|cffff9933" .. BS.Comma(r.making) .. "|r")
+			else
+				row.cells[2]:SetText(BS.Comma(r.making))
+			end
+
+			row.cells[3]:SetText(r.missing and "|cffff4444?|r" or BS.Money(r.each))
+			row.cells[4]:SetText(r.sell and BS.Money(r.sell) or "|cff666666no price|r")
+
+			if r.profit then
+				row.cells[5]:SetText(SignedMoney(r.profit))
+			elseif r.profitEach then
+				row.cells[5]:SetText("|cff888888each|r " .. SignedMoney(r.profitEach))
+			else
+				row.cells[5]:SetText("|cff666666?|r")
+			end
+			row:Show()
+		else
+			row.crow = nil
+			if eb:HasFocus() then
+				eb.painting = true
+				eb:ClearFocus()
+				eb.painting = nil
+			end
+			eb.owner = nil
+			row:Hide()
+		end
+	end
+	FauxScrollFrame_Update(g.craftScroll, #q.crafts, QC_ROWS, QUOTE_ROW_H)
+
+	---------------------------------------------------------- the reagents --
+	offset = FauxScrollFrame_GetOffset(g.reagScroll) or 0
+	for i = 1, QR_ROWS do
+		local row = g.reagRows[i]
+		local r   = q.rows[offset + i]
+		if r then
+			row.qrow = r
+			local it = r.item
+
+			if r.canTick then
+				row.check:SetChecked(it.accept and true or false)
+				row.check:Show()
+			else
+				row.check:Hide()
+			end
+
+			row.cells[1]:SetText(it.link or it.name or "?")
+			row.cells[2]:SetText(BS.Comma(r.need))
+			row.cells[3]:SetText(r.take < r.need
+				and ("|cffff9933" .. BS.Comma(r.take) .. "|r") or BS.Comma(r.take))
+			row.cells[4]:SetText(r.paidEach and BS.Money(r.paidEach) or "|cff666666-|r")
+			row.cells[5]:SetText(r.cost > 0 and BS.Money(r.cost) or "|cff666666-|r")
+			row.cells[6]:SetText((QUOTE_TONE[r.tone] or "") .. (r.note or "") .. "|r")
+			row:Show()
+		else
+			row.qrow = nil
+			row:Hide()
+		end
+	end
+	FauxScrollFrame_Update(g.reagScroll, #q.rows, QR_ROWS, QUOTE_ROW_H)
+
+	------------------------------------------------------------- the notes --
+	local lines, cut = {}, 0
+	for _, r in ipairs(q.crafts) do
+		if r.on and r.making < r.chosen then cut = cut + 1 end
+	end
+	if cut > 0 then
+		lines[#lines + 1] = format("|cffff9933%d craft%s cut back to what the reagents on "
+			.. "sale allow - hover %s for the reagent that limits it.|r",
+			cut, cut == 1 and "" or "s", cut == 1 and "it" or "them")
+	end
+	local vendorN = 0
+	for _, e in ipairs(q.vendor) do vendorN = vendorN + (e.short or 0) end
+	if vendorN > 0 then
+		lines[#lines + 1] = format("|cff88bbffPlus %d from a vendor - not in this total.|r",
+			vendorN)
+	end
+	g.notes:SetText(table.concat(lines, "\n"))
+
+	------------------------------------------------------------ the totals --
+	g.total:SetText("Spend  " .. BS.Money(q.total))
+	g.profit:SetText("Expected profit  " .. SignedMoney(q.profit)
+		.. "  |cff888888before the 5% AH cut|r")
+
+	local warn = {}
+	if q.total > GetMoney() then
+		warn[#warn + 1] = format("|cffff4444You have %s - it will buy down the list until "
+			.. "the gold runs out.|r", BS.Money(GetMoney()))
+	end
+	if (q.unknown or 0) > 0 then
+		warn[#warn + 1] = format("|cff888888%d craft%s with no sell price left out of the "
+			.. "profit.|r", q.unknown, q.unknown == 1 and "" or "s")
+	end
+	if q.shortAny then
+		warn[#warn + 1] = "|cffff9933Some reagents come up short.|r"
+	end
+	g.warn:SetText(table.concat(warn, "  "))
+
+	if q.total > 0 then
+		g.buyBtn:SetText("Buy for " .. BS.MoneyPlain(q.total))
+		g.buyBtn:Enable()
+	else
+		g.buyBtn:SetText("Nothing to buy")
+		g.buyBtn:Disable()
 	end
 end
 

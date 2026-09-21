@@ -1009,6 +1009,10 @@ end
 function BS:BuyStop(reason)
 	local run = self.buyRun
 
+	-- kept on the run, because a shopping run coming up short needs to be able
+	-- to say why this purchase ended and not merely that it did
+	if run then run.stopReason = reason end
+
 	--[[
 		A press still waiting on the server is settled on the way out rather
 		than dropped. Whatever gold has already left the bag bought something,

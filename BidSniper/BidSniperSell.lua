@@ -974,14 +974,54 @@ end
 	empty square.
 ]]
 function BS:SellAvailable(link)
-	local have, bag, slot = 0, nil, nil
+	local have, bag, slot, held = 0, nil, nil, 0
+
 	for _, e in ipairs(self:SellRegion()) do
-		if e.link == link and not e.bound and not e.locked then
-			have = have + (e.count or 1)
-			if not bag then bag, slot = e.bag, e.slot end
+		if e.link == link and not e.bound then
+			if e.locked then
+				--[[
+					Counted, not ignored.
+
+					A locked slot is one the client has an operation pending on -
+					it has told the server something about that slot and is
+					waiting to be told it happened. Touching it before the answer
+					arrives is precisely how a bag slot ends up stuck: the lock
+					is never lifted, the item greys out, and nothing short of a
+					relog gets it back.
+
+					Which is why the difference between "locked" and "gone"
+					matters enough to return separately. They used to be the same
+					answer here, so a stack that was merely mid-operation read as
+					a stack that had left the bag, and the lot was skipped for
+					good over a wait that would have been over in a moment.
+				]]
+				held = held + (e.count or 1)
+			else
+				have = have + (e.count or 1)
+				if not bag then bag, slot = e.bag, e.slot end
+			end
 		end
 	end
-	return have, bag, slot
+
+	return have, bag, slot, held
+end
+
+--[[
+	Is the auction house still busy with the last thing we handed it?
+
+	`GetAuctionSellItemInfo` answers for the sell slot, and a sell slot that
+	still holds something after a posting means the server has not finished
+	taking it. Putting the next item in on top of that is the other way this
+	goes wrong: the swap hands the half-posted item back to a bag slot that is
+	still locked for it, and the slot is then wedged for the session.
+
+	One C call, and nil in the ordinary case - which is the whole design brief
+	here. Nothing waits unless there is genuinely something to wait for.
+]]
+function BS:SellSlotBusy()
+	if type(GetAuctionSellItemInfo) ~= "function" then return false end
+	local ok, name = pcall(GetAuctionSellItemInfo)
+	return (ok and name) and true or false
 end
 
 function BS:ArmSell(lot)
@@ -992,9 +1032,25 @@ function BS:ArmSell(lot)
 	if not lot or not lot.item then return false end
 
 	local it = lot.item
-	local have, bag, slot = self:SellAvailable(it.link)
+
+	--[[
+		Nothing goes into the sell slot while the last posting is still leaving
+		it. Checked before the bags are even read, because it is the cheaper
+		question and the one that stops the worse failure.
+	]]
+	if self:SellSlotBusy() then return false, "busy" end
+
+	local have, bag, slot, held = self:SellAvailable(it.link)
 
 	if not bag then
+		--[[
+			Every copy is locked rather than gone: an operation is in flight on
+			those slots and will finish in a moment. Waiting is right; skipping
+			would throw the item away over a fraction of a second, and picking
+			one up anyway is what wedges it.
+		]]
+		if held > 0 then return false, "busy" end
+
 		self:Print(format("No more %s in there - skipping it.",
 			it.link or it.name or "?"))
 		return false
@@ -1013,6 +1069,11 @@ function BS:ArmSell(lot)
 	]]
 	local stacks = math.min(lot.stacks, floor(have / lot.count))
 	if stacks < 1 then
+		-- short only because the rest of it is mid-operation: that is a wait,
+		-- not a shortfall, and posting the smaller number would be wrong
+		if held > 0 and (have + held) >= lot.count then
+			return false, "busy"
+		end
 		self:Print(format("Not enough %s left for a lot of %d - skipping it.",
 			it.link or it.name or "?", lot.count))
 		return false
@@ -1023,13 +1084,28 @@ function BS:ArmSell(lot)
 	PickupContainerItem(bag, slot)
 	if GetCursorInfo() ~= "item" then
 		ClearCursor()
-		self:Print("Could not pick that item up.")
-		return false
+		-- the slot locked between reading it and reaching for it, which is a
+		-- race we lose harmlessly by trying again rather than by giving up
+		return false, "busy"
 	end
 	ClickAuctionSellItemButton()
+
+	--[[
+		The cursor should be empty now: the sell slot took what was on it. When
+		it is not, the click did not land, and dropping the item with a bare
+		ClearCursor is a coin toss over where it goes. Putting it back in the
+		slot it came from is the one outcome that is certainly correct, and it
+		leaves the bag exactly as it was found.
+	]]
+	if GetCursorInfo() == "item" then
+		PickupContainerItem(bag, slot)
+		ClearCursor()
+		return false, "busy"
+	end
 	ClearCursor()
 
 	self.armedSell = lot
+	lot.waited = nil
 	-- whatever we were waiting on has happened, or we have stopped waiting
 	self.sellSettleFor, self.sellArmAt = nil, nil
 	self:SetStatus(format("Ready: %d x %s of %d at %s each  -  press POST",
@@ -1165,6 +1241,13 @@ function BS:SellArmNext()
 end
 
 --[[
+	How many times one lot may be told to come back later before it is given up
+	on. Six tries at a quarter of a second is a second and a half of patience,
+	which is far longer than a round trip and far shorter than a person notices.
+]]
+local MAX_WAITS = 6
+
+--[[
 	Change your mind about a lot size with the run already lined up.
 
 	The queue is worked out once and then walked, so a size typed after the
@@ -1240,7 +1323,39 @@ function BS:SellArmHere()
 			return
 		end
 
-		if self:ArmSell(lot) then return end
+		local armed, why = self:ArmSell(lot)
+		if armed then return end
+
+		--[[
+			"Busy" is not "no". Something is in flight - the sell slot has not
+			finished taking the last posting, or the bag slots are locked
+			pending the server's answer - and the one thing that must not happen
+			is reaching into it anyway. That is what leaves a gem greyed out
+			until you log back in.
+
+			So the lot keeps its place in the queue and comes round again a
+			fraction of a second later. Bounded, because waiting forever on
+			something that is never going to clear would be its own kind of
+			stuck: after a few tries it is treated as a real refusal and the
+			queue moves on with a word about it.
+		]]
+		if why == "busy" then
+			lot.waited = (lot.waited or 0) + 1
+			if lot.waited <= MAX_WAITS then
+				self.sellArmAt  = GetTime() + 0.25
+				self.sellArmBy  = GetTime() + 1.5
+				self.sellArmSeq = self.bagSeq or 0
+				self:SetStatus("Waiting for the auction house to finish the last one...")
+				self:UpdateUI()
+				return
+			end
+
+			self:Print(format("|cffff8800%s is still tied up|r - the auction house has "
+				.. "not let go of it. Skipped rather than risking the slot; press "
+				.. "Refresh and post it on its own.",
+				(lot.item and (lot.item.link or lot.item.name)) or "That item"))
+		end
+
 		-- that one could not be loaded; go past it rather than stalling
 		self.sellIndex = self.sellIndex + 1
 	end

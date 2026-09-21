@@ -646,6 +646,28 @@ between while the stacks actually leave your bags. That pause is not optional:
 loading the remainder in the same click would pick up a stack the server is
 still in the middle of taking.
 
+#### It won't reach into a slot the client is still using
+
+Spam-clicking POST used to leave the odd gem greyed out and unclickable until a
+relog. That is the 3.3.5a item-lock wedge: a bag slot the client has an
+operation pending on is *locked*, and touching it before the server answers
+means the lock is never lifted.
+
+Two things now stop it, and neither costs anything when nothing is wrong:
+
+* **Nothing goes into the sell slot while the last posting is still leaving
+  it.** One call answers that; putting the next item in on top of a half-posted
+  one hands it back to a bag slot still locked for it.
+* **A locked slot is waited for, not skipped.** Locked and gone used to be the
+  same answer, so a stack that was merely mid-operation read as one that had
+  left the bag — and the lot was dropped for good over a wait that would have
+  been over in a moment.
+
+The wait ends on the bag or item-lock event that says the operation finished, so
+it is as short as the server allows rather than a fixed pause — usually
+invisible. After about a second and a half of a slot refusing to free up, the
+lot is skipped with a note rather than risked.
+
 ### What it will and won't do
 
 * It never posts more than the ticked range is holding. The count is taken
@@ -853,51 +875,100 @@ list.
 
 ### Buy the list
 
-**Buy the list** takes the shopping list to the Buy tab and works down it for
-you. You don't search for anything.
+**Price & buy** takes the shopping list to the auction house in two steps: it
+prices all of it, shows you the exact total, and only buys once you approve that
+figure. You don't search for anything. Before you press it, the button shows an
+estimate from the last scan — `Buy ~293g12s` — so you know roughly what the list
+comes to; the quote replaces it with the exact figure.
 
-For each reagent in turn it fills in the search, reads every page of results,
-solves the same covering knapsack the Buy tab solves by hand — the cheapest set
-of auctions that gets you at least what you're short of — and arms the purchase.
-You press **BUY**. It moves straight on to the next reagent.
+For each reagent it fills in the search, reads every page of results, and solves
+the same covering knapsack the Buy tab solves by hand — the cheapest set of
+auctions that gets you at least what you're short of. When you approve, it arms
+each purchase in turn. You press **BUY**; it moves on to the next reagent.
 
-The list is walked dearest first, so if the gold runs out it ran out on the
-cheap end.
+#### You see the exact price, and what it earns, before anything is bought
 
-**You approve one total, at the start.** The dialog names it, and a run never
-spends past it however the market behaves. There's no confirmation per reagent:
-one decision that means something beats fifteen that teach you to click through
-them.
+The first pass buys nothing. It prices every reagent, then checks what each
+finished craft sells for, and ends in a **quote** — a window in two halves.
 
-#### It won't pay more than the list said
+**The crafts**, one row per craft you put a Want against:
 
-This is the whole safety of it. Each reagent has a quote from the last scan, and
-a run pays at most that plus a margin — the `pay up to +20%` box next to the
-button. Anything dearer is left alone, named in chat with both figures, and the
-run carries on.
+| Column | What it shows |
+| --- | --- |
+| Make | Tick box — untick to leave the craft out |
+| Want | How many to make, up to your Want column — lower it here to trim |
+| Making | How many can actually be made — orange when a reagent cuts it |
+| Reagents each | What one craft's reagents cost |
+| Sells for each | What one craft sells for |
+| Profit | Making × (sells for − reagents), green or red |
 
-The margin is measured **against the part of the purchase you actually needed**,
+**Reagents each** is priced from this run's own purchases: each reagent at the
+**average of everything bought of it, across every craft**, together with what
+your bags already hold at its usual price. That's what makes the quote a filter.
+The cheapest auctions go first, so a reagent shared between crafts gets dearer the
+more of it you buy, and that cost lands on every craft using it. Untick a craft, or
+lower its Want, and the dearest auctions drop out of the plan: the average falls,
+and the crafts you kept earn more. Every change works the whole quote out again, so
+you can keep trimming until the total profit stops going up.
+
+The whole of an auction's cost is carried by the items you needed from it — a
+stack bought for its first fifteen costs what it costs — because a craft is only
+worth making if it pays for the stack it made you buy.
+
+**Sells for** is the price the Sell tab would post at: giveaway listings ignored,
+your own auctions not counted. A price checked or scanned within the hour is reused
+rather than searched again, and anything it does search is saved for the Sell tab.
+If nobody else is selling a craft, the last scan's price is used and the tooltip
+says so; no price at all shows `no price` and is left out of the profit.
+
+An unticked craft still shows what one would earn, in grey, so you can tell
+whether it's worth ticking again. Profit is before the 5% auction house cut — hover
+a craft for the figure after it, and for its reagent breakdown.
+
+**The reagents**, below the crafts: Need, Buying (orange when short), what you're
+paying each, the cost, and a note — `fair price`, `only 12 for sale`,
+`nobody is selling it`.
+
+At the bottom: **Spend** — the exact purchase total, from real auctions for real
+quantities — and **Expected profit** for what you've left ticked.
+
+The window says how long ago it priced things, and turns orange past five minutes.
+**Cancel** buys nothing. Closing the window doesn't cancel — the crafting page's
+button turns into **Show the quote**. Nothing in the quote changes your Want column.
+
+#### Over your limit: your call, per reagent
+
+The `pay up to +20%` box next to the button decides what counts as **fair**: at
+most that much over a reagent's usual price. A reagent whose cheapest auctions
+are fair but whose rest aren't supplies only the fair part — and gets a tick box.
+**Tick it** and the dear part is bought too. The quote is worked out again on
+every click, because buying more of one reagent can give a recipe its numbers
+back, and that changes what the *other* reagents are needed for.
+
+Reagents with no usual price on file get a tick box as well: ticked, they're
+bought at whatever the auction house is asking, and the cost column shows that
+figure.
+
+The margin is measured **against the part of the purchase you actually need**,
 which matters more than it sounds:
 
 | Situation | What a naive check does | What this does |
 | --- | --- | --- |
-| Short 40, cheapest cover is 50 for less than 40 was quoted | fine | **buys** — the overshoot is free |
-| Short 2, the only thing up is a stack of 20 for 380g | per-item price looks fine, **spends 380g** | **leaves it** — 2 were quoted at 40g |
-| Short 40, only 5 up at six times the price | total is under the 40-item quote, **buys** | **leaves it** — 5 were quoted at 25g |
+| Short 40, cheapest cover is 50 for less than 40 was quoted | fine | **fair** — the overshoot is free |
+| Short 2, the only thing up is a stack of 20 for 380g | per-item price looks fine, **spends 380g** | **over the limit** — 2 were worth 40g |
+| Short 40, only 5 up at six times the price | total is under the 40-item quote, **buys** | **over the limit** — 5 were worth 25g |
 
-So a stack that overshoots is judged on the items you wanted, not on the ones
-that came along with them; and a purchase that falls short is judged on what it
-actually got.
+#### The total you approve is never exceeded
 
-`0%` means never a copper over the quote. Above that is a margin for the cheap
-auction that got taken between the scan and the trip — 20% is a sensible start,
-and a genuinely moved market still stops a run.
+Approving sets a ceiling, and nothing crosses it. Each reagent is held to the
+exact price its quote gave it for that quantity. A price that has crept up in the
+minutes between the quote and the purchase can be covered — by at most your +% —
+but **only out of money another reagent came in under**, never out of what's set
+aside for the rest of the list. Anything it still can't get is left short and
+named at the end.
 
-> **A run can come back having bought half the list. That's the correct
-> outcome.** Prices move, and quietly paying triple for Frost Lotus because it
-> was on a list you approved ten minutes ago is the thing this exists to stop.
-> Everything it left alone is named, with both figures, and is one search away on
-> the tab you're already looking at.
+It never goes back for more than you approved either. A reagent you left
+unticked stays at its fair part, however many times the run looks again.
 
 #### It looks at everything before it buys anything
 
@@ -913,17 +984,12 @@ round twice:
    worth paying.
 2. **Solve.** Those numbers together decide how many of each recipe are really
    makeable.
-3. **Buy.** The list is bought to the corrected numbers.
+3. **Quote.** Those numbers are priced and put in front of you, with the cut
+   recipes listed under them — see above.
+4. **Buy.** Once you approve, the list is bought to the corrected numbers.
 
-Before a copper moves, it tells you what it concluded:
-
-```
-What the auction house can actually supply:
-   Elixir of Detect Undead   12 instead of 40   - not enough Ghost Mushroom
-Buying for those numbers, not the ones you typed.
-```
-
-"At a price worth paying" is doing real work in step 1. A reagent with 200 up,
+"At a price worth paying" is doing real work in step 1 — it's the fair part,
+unless you tick a reagent in the quote. A reagent with 200 up,
 of which the first 30 are sensible and the rest are somebody's fantasy, supplies
 **30** — because 30 is what will be bought, so 30 is what the recipes have to be
 worked out from.
@@ -940,10 +1006,10 @@ first** — the order the Craft page is already sorted in — because half a bat
 two things is worth less than a whole batch of the better one. Only whole crafts
 count: five of something you need two of makes two, never two and a half.
 
-Reagents with **no price** are looked up rather than ignored. They're still never
-bought — there's no quote to hold them to — but what's for sale decides how many
-of everything else is worth buying, and a reagent nobody can price is just as
-capable of being the one you can't get.
+Reagents with **no usual price** are looked up rather than ignored, and only bought
+if you tick them in the quote. Either way, what's for sale decides how many of
+everything else is worth buying — a reagent nobody can price is just as capable
+of being the one you can't get.
 
 The bank counts here, and only here. It never stops a reagent being bought — the
 list has always counted bags alone — but it would be a worse lie to say you can't
@@ -987,8 +1053,9 @@ against what was asked for.
 
 Now it does. When a reagent's purchase ends short, the run **searches again and
 buys the difference**, up to four passes. Every pass re-searches, re-plans and
-re-prices against what is up *now*, so the price ceiling, the budget and the gold
-check apply to the rest of the order exactly as they did to the start of it.
+re-prices against what is up *now*, so the quoted prices, the approved total and
+the gold check apply to the rest of the order exactly as they did to the start of
+it. It never goes back for more than the quote approved.
 
 It goes round again only if the pass that just ended **actually bought
 something**. That is what makes it stop rather than a counter: each pass strictly
@@ -1008,6 +1075,25 @@ is one you find out about at the forge.
 
 This is the shopping run only. A **Buy** you drive by hand stops when its plan is
 filled and leaves the next move to you.
+
+#### It says why a craft came up short
+
+The report at the end lists what you can now make, and under every craft that came
+up short it names the reagent that held it back — with the counts, and the cause:
+
+```
+6 x Flask of Blinding Light   (you asked for 15)
+   short on Netherbloom: got 36 of 90 - only 40 were within your +20% limit,
+   and you left the rest unticked in the quote
+```
+
+Causes decided before buying — not enough for sale, over your limit and left
+unticked, no usual price — come from what the price check actually saw. Causes
+that happened while buying — taken by somebody else, dearer by the time it was
+bought, out of gold, skipped — were written down when they happened. A reagent
+that caps several crafts is explained once and pointed at after that, and crafts
+you left out in the quote are listed on their own line, so a missing flask is
+never a mystery.
 
 #### Telling "about to spend" from "already spent"
 
@@ -1138,7 +1224,14 @@ are still counted, and they get their own line on the shopping list so you leave
 knowing how many to pick up.
 
 Built in: the six threads (Coarse, Fine, Silken, Heavy Silken, Rune, Eternium) and
-Salt. Nothing else. There is no API that says "a vendor sells this", so this is a
+Salt. Nothing else. Alchemy's rule is a family rather than a list — **anything
+whose name ends in "Vial"** is a vendor item, named or not. A list of five was a
+list that had to be right, and it wasn't: Enchanted Vial was missing, so the
+flasks using it went to the auction house for a container that costs a few
+silver off a shelf. A vial this addon has never heard of now can't cost you
+anything.
+
+There is no API that says "a vendor sells this", so the rest is a
 list, and it errs deliberately towards charging you: anything not on it is treated
 as something you buy from other players. Getting it wrong the other way would call
 an auction house item free and put the wrong recipe at the top of the page.
