@@ -3,7 +3,37 @@
 Finds auctions where the bid is far below the buyout — the 1 silver bid /
 15 gold buyout kind — and helps you act on them quickly.
 
+It grew into the whole auction house round trip: find the underpriced bids, buy
+the reagents for what you plan to make, post what you want to sell, and keep a
+record of every bid you placed.
+
 For **World of Warcraft 3.3.5a** (Wrath of the Lich King, tested on Warmane).
+No dependencies; [Auctionator](https://github.com/Auctionator/Auctionator) is
+used if you have it.
+
+| Tab | What it is for |
+| --- | --- |
+| **Auctions** | Scan the whole house and sort by what you would actually make |
+| **Buy** | The cheapest set of auctions that covers what you need |
+| **Sell** | Post from a staging bag, priced against the live market |
+| **Profit** | What a craft costs, what it earns, and the shopping list for it |
+| **Training** | The cheapest way to buy a skill point |
+
+## Contents
+
+* [Install](#install) · [Quick start](#quick-start) · [The window](#the-window)
+* Bidding — [Row actions](#row-actions) · [Bidding in bulk](#bidding-in-bulk) ·
+  [Filters](#filters) · [Categories](#categories) · [Wishlist](#wishlist)
+* [Buying](#buying) · [Selling](#selling)
+* Crafting — [Crafting](#crafting) ·
+  [Training](#training-the-cheapest-way-to-level)
+* Under the bonnet — [Scan methods](#scan-methods) ·
+  [Market and Profit](#market-and-profit) ·
+  [Auctions that have moved on](#auctions-that-have-moved-on) ·
+  [My bids](#my-bids-what-happened-while-you-were-away) ·
+  [Why bidding needs a click](#why-bidding-needs-a-click)
+* [Troubleshooting](#troubleshooting) · [Commands](#commands) ·
+  [Saved data](#saved-data)
 
 ---
 
@@ -13,12 +43,21 @@ Drop the `BidSniper` folder into `Interface\AddOns\`, so you end up with:
 
 ```
 Interface/AddOns/BidSniper/BidSniper.toc
-Interface/AddOns/BidSniper/BidSniper.lua
-Interface/AddOns/BidSniper/BidSniperLedger.lua
-Interface/AddOns/BidSniper/BidSniperCraft.lua
-Interface/AddOns/BidSniper/BidSniperSell.lua
-Interface/AddOns/BidSniper/BidSniperBuy.lua
-Interface/AddOns/BidSniper/BidSniperUI.lua
+Interface/AddOns/BidSniper/BidSniper.lua          the window, scanning, bidding
+Interface/AddOns/BidSniper/BidSniperLedger.lua    the record of your bids
+Interface/AddOns/BidSniper/BidSniperCraft.lua     recipes, costings, shopping lists
+Interface/AddOns/BidSniper/BidSniperSell.lua      posting from your bags
+Interface/AddOns/BidSniper/BidSniperBuy.lua       searching and buying
+Interface/AddOns/BidSniper/BidSniperShop.lua      buying a whole shopping list
+Interface/AddOns/BidSniper/BidSniperAtr.lua       sharing a GetAll with Auctionator
+Interface/AddOns/BidSniper/BidSniperUI.lua        every panel
+```
+
+The repository is the addon folder itself, so cloning it straight into place
+works:
+
+```bash
+git clone https://github.com/jrealinho/BidSniper.git BidSniper
 ```
 
 > ### Upgrading? Restart the client, don't `/reload`
@@ -77,6 +116,27 @@ at 60g each is a 480g row, not a 60g one. Hover for the per-auction breakdown.
 As you bid the copies off a row, its Profit falls to what's left on it.
 | Left | Time left, or `stale` / `gone` |
 | Seller | Who posted it |
+
+---
+
+## The window
+
+It opens with the auction house and sits over it. Five tabs, in two families:
+the three that are about the auction house itself, then the two that are about
+what to do with what you bought.
+
+| Tab | What it does |
+| --- | --- |
+| **Auctions** | The scan results: every auction whose bid is far under what the item is worth. Sort by **Profit** and work down |
+| **Buy** | Search one item and buy it properly — the cheapest *combination* of auctions that covers what you need, not the cheapest one |
+| **Sell** | Empty a staging patch of your bags onto the auction house, priced from a live check of the market |
+| **Profit** | Every recipe you know, what its reagents cost, what it sells for, and what that leaves. Type quantities and it builds the shopping list |
+| **Training** | The same recipes read the other way: what a skill point costs |
+
+Three side panels open from the Auctions tab — **Categories**, **Wishlist** and
+**My bids** — and close again by pressing the same button.
+
+The window is movable, remembers where you left it, and closes with Escape.
 
 ---
 
@@ -873,9 +933,10 @@ materials into a flask is worth doing at today's prices either way.
 Profit is raw; the 5% auction house cut is in the tooltip, as with the results
 list.
 
-### Buy the list
+### Price & buy: the shopping run
 
-**Price & buy** takes the shopping list to the auction house in two steps: it
+**Price & buy** (the button is marked with an estimate, `Buy ~293g12s`) takes
+the shopping list to the auction house in two steps: it
 prices all of it, shows you the exact total, and only buys once you approve that
 figure. You don't search for anything. Before you press it, the button shows an
 estimate from the last scan — `Buy ~293g12s` — so you know roughly what the list
@@ -1352,7 +1413,7 @@ both lists open-ended.
 ### The rest works the same
 
 Prices, the exact-or-estimate split, **Can make**, the **Want** column, the
-shopping list, the bank never being deducted, and **Buy the list** all behave
+shopping list, the bank never being deducted, and **Price & buy** all behave
 exactly as described under [Crafting](#crafting). A shopping run started from a
 page shops for that page's recipes and no others — it remembers which page sent
 it, so switching tabs mid-run changes nothing. It also remembers the mode, so
@@ -1618,6 +1679,24 @@ have the next one ready the instant you click. That is what the BID button is.
 
 ---
 
+## Troubleshooting
+
+| What you see | What it is |
+| --- | --- |
+| A change to the addon did not take | `/reload` re-runs the files already listed in the `.toc`, and has been seen serving them from a stale cache. **Fully exit and start the client again** — always after a version that adds a file |
+| Settings and results come back blank every session | The WoW folder is read-only, and the save fails silently — see [Install](#install). Change a filter, `/reload`, and check whether it stuck |
+| Errors about a nil value after updating | A file was added to the `.toc` and the client has not re-read it. Restart |
+| *"GetAll is on cooldown"* | That cooldown is about fifteen minutes and is shared by every addon on the client. `/snipe thorough` pages through instead, and misses nothing |
+| A scan finds fewer auctions than you expect | Do not run Auctionator's or TSM's scanner at the same time — see [Scan methods](#scan-methods) |
+| **Market** and **Profit** are empty | Nothing has priced those items yet. Run a scan, or install Auctionator; `/snipe prices` rebuilds the column |
+| A Market price disagrees with Auctionator | Hover the row — it names which of the three sources priced it. `/snipe prices` forces a rebuild |
+| A stack is greyed out and unclickable after posting | The client's item lock was left set; relogging clears it. The Sell tab now waits for locks rather than reaching into a slot the client is still using |
+| You have fewer items than a run reported buying | Auction purchases arrive **by post**. Check the gold: if the full total left your purse, the rest is in the mailbox |
+| A craft came up short | The report at the end names the reagent that limited it, with the counts and the cause |
+| A shopping run bought nothing | Its status line says why, and the report says it reagent by reagent. Most often everything for sale was over your `+%` limit |
+
+---
+
 ## Commands
 
 | Command | Does |
@@ -1633,7 +1712,7 @@ have the next one ready the instant you click. That is what the BID button is.
 | `/snipe buyplan` | Print what the current plan would buy, and for how much |
 | `/snipe shop` | Buy the whole shopping list — it drives the Buy tab for you |
 | `/snipe shoplist` | Print what a shopping run would buy, and for how much |
-| `/snipe shopmax <n>` | How far over the list price a run may go (default 20%) |
+| `/snipe shopmax <n>` | How far over its usual price a reagent still counts as fair (default 20%) |
 | `/snipe shopstop` | End the shopping run that's going |
 | `/snipe shopped` | Print the report from the last shopping run again |
 | `/snipe craft` | Open the Profit tab (`/snipe profit` too) |
@@ -1661,7 +1740,13 @@ have the next one ready the instant you click. That is what the BID button is.
 | `/snipe why <n>` | Say which filter dropped row *n* of the Browse list |
 | `/snipe peek <n>` | Read row *n* of the Browse list, bidding on nothing |
 | `/snipe try <n>` | Test-bid row *n* of the Browse list, showing every input |
+| `/snipe trysel <n>` | Same, but select the row first |
+| `/snipe help` | Print every command in chat |
 | `/snipe reset` | Restore defaults and reload |
+
+Shorter names for the same things: `newscan` for `scan`, `profit` for `craft`,
+`level` for `training`, `alchemy` for `flasks`, `lw` for `leather`, and
+`leathercrafts` for `crafts leather`.
 
 ---
 
@@ -1682,7 +1767,7 @@ trade. Your `/snipe vendor` corrections are saved too, and outrank the built-in
 lists, as does the per-profession **only what can still level me** tick.
 
 A shopping run keeps only its margin setting. What a run bought is remembered for
-the session, so pressing **Buy the list** again can warn you about purchases
+the session, so pressing **Price & buy** again can warn you about purchases
 still sitting in the post — but it goes at a reload, and after one the list
 counts your bags and nothing else.
 
